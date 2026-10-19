@@ -1,0 +1,19 @@
+{
+  "_comment": "Golden vectors do framing length-prefixed (uint32 big-endian + payload). Fonte canonica: psychoscope-proto. Cada consumidor vendoriza uma copia. 'expect': ok = frame lido com sucesso e payload igual; eof = EOF limpo na fronteira (sem bytes); empty = tamanho 0; too_large = tamanho > max_frame_size (rejeitado SEM ler/alocar payload); truncated = EOF no meio do header ou do payload. 'payload_fill' expande 'count' repeticoes do byte 'byte' (hex).",
+  "max_frame_size": 1048576,
+  "cases": [
+    { "name": "one_byte", "header": "00000001", "payload": "ab", "expect": "ok" },
+    { "name": "small_text", "header": "00000005", "payload": "0a03666f6f", "expect": "ok" },
+    { "name": "length_256_proves_big_endian", "header": "00000100", "payload_fill": { "byte": "07", "count": 256 }, "expect": "ok" },
+    { "name": "max_exact", "header": "00100000", "payload_fill": { "byte": "ab", "count": 1048576 }, "expect": "ok" },
+    { "name": "clean_eof", "header": "", "expect": "eof" },
+    { "name": "zero_length", "header": "00000000", "expect": "empty" },
+    { "name": "too_large_by_one", "header": "00100001", "expect": "too_large" },
+    { "name": "little_endian_misread_guard", "header": "01000000", "expect": "too_large" },
+    { "name": "max_u32", "header": "ffffffff", "expect": "too_large" },
+    { "name": "truncated_header_1_byte", "header": "00", "expect": "truncated" },
+    { "name": "truncated_header_3_bytes", "header": "000000", "expect": "truncated" },
+    { "name": "truncated_payload", "header": "00000004", "payload": "aabb", "expect": "truncated" },
+    { "name": "truncated_payload_zero_bytes", "header": "00000004", "expect": "truncated" }
+  ]
+}
