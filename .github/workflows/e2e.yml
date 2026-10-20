@@ -12,7 +12,7 @@ jobs:
           repository: psychoscope-io/psychoscope-core
           path: psychoscope-core
       - run: sudo apt-get update && sudo apt-get install -y libpcap-dev python3
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: psychoscope-core/go.mod
           cache-dependency-path: psychoscope-core/go.sum
