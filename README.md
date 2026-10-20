@@ -43,3 +43,7 @@ scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn`
 
 Depende de `psychoscope-proto` via `git` + `tag = "v0.1.0"` (`Cargo.lock` fixa o commit). Antes da publicação (ou offline): `source ../psychoscope-proto/scripts/local-deps.sh` faz o Cargo buscar a tag no checkout local; os scripts `e2e.sh`/`live_smoke.sh` já fazem isso quando o repositório irmão existe. Para iterar no contrato sem criar tags, use `[patch]` em `.cargo/config.toml` (ignorado pelo git).
 Se `libpcap-dev` não estiver instalado, mas a lib de runtime sim, crie um symlink `libpcap.so` num diretório qualquer e exporte `LIBPCAP_LIBDIR=<dir>` para linkar.
+
+## Licença
+
+Apache License 2.0 — veja [LICENSE](LICENSE).

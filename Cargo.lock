@@ -658,7 +658,7 @@ checksum = "263a3f48f01e7309e857138bd47f785585b4a005e8e56c6d2824ce91195999c3"
 [[package]]
 name = "psychoscope-proto"
 version = "0.1.0"
-source = "git+https://github.com/Bandeira27/psychoscope-proto?tag=v0.1.0#99f6384066175e5e898c62df24c3c99df0538ad6"
+source = "git+https://github.com/psychoscope-io/psychoscope-proto?tag=v0.1.0#7887544e7a8c3aabb07fa1d29ed5f750cf44fabd"
 dependencies = [
  "prost",
  "prost-build",
@@ -821,7 +821,7 @@ version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
- "errno 0.3.14",
+ "errno 0.2.8",
  "libc",
 ]
 
