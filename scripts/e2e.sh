@@ -8,6 +8,7 @@ set -euo pipefail
 export PATH="$HOME/.local/go/bin:$PATH"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # Layout de desenvolvimento (repos irmaos): resolve psychoscope-proto a partir do checkout local.
+# shellcheck source=/dev/null
 [ -f "$HERE/../psychoscope-proto/scripts/local-deps.sh" ] && source "$HERE/../psychoscope-proto/scripts/local-deps.sh"
 CORE="$HERE/../psychoscope-core"
 TMP="$(mktemp -d)"
@@ -56,6 +57,7 @@ echo "ok: $EXPECTED eventos recebidos pelo Core"
 # Deteccao: o pcap malicioso deve gerar EXATAMENTE estes 10 alertas (nenhum falso positivo
 # no trafego benigno e nenhum extra).
 EXPECTED_ALERTS=10
+# shellcheck disable=SC2086 # CLI guarda o binario e suas flags
 alerts_now() { timeout 2 $CLI alerts > "$TMP/alerts.txt" 2>/dev/null || true; wc -l < "$TMP/alerts.txt"; }
 for _ in $(seq 40); do [ "$(alerts_now)" -ge $EXPECTED_ALERTS ] && break; sleep 0.2; done
 cat "$TMP/alerts.txt"
