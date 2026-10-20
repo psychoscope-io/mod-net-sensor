@@ -4,8 +4,6 @@
 //!
 //! Enquanto desconectado, os eventos recebidos sao descartados (e contados): a captura
 //! nunca fica retida esperando o Core.
-use std::collections::HashMap;
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -27,6 +25,9 @@ use crate::procstats::{CpuMeter, rss_mb};
 
 /// Versao do protocolo IPC falada por este modulo (deve casar com o Core).
 pub const PROTOCOL_VERSION: u32 = 1;
+
+pub use controller::{Controller, StatsSnapshot};
+mod controller;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,26 +57,6 @@ impl ClientConfig {
             status_interval_override: None,
         }
     }
-}
-
-/// Numeros do pipeline reportados no `StatusModulo`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct StatsSnapshot {
-    pub packets_captured: u64,
-    pub bytes: u64,
-    /// Pacotes perdidos em qualquer etapa (kernel, canal do sniffer).
-    pub packets_dropped: u64,
-}
-
-/// Interface entre os comandos do Core e o resto do sensor.
-pub trait Controller: Send + Sync + 'static {
-    fn pause(&self);
-    fn resume(&self);
-    fn reconfigure(
-        &self,
-        params: HashMap<String, String>,
-    ) -> impl Future<Output = Result<(), String>> + Send;
-    fn stats(&self) -> StatsSnapshot;
 }
 
 /// Contadores do proprio cliente, compartilhados com o restante do processo.

@@ -72,55 +72,64 @@ pub struct Packet<'a> {
 }
 
 pub fn decode_frame(link: LinkType, frame: &[u8]) -> Result<Packet<'_>, DecodeError> {
-    let (ethertype, l3) = match link {
-        LinkType::Ethernet => ethernet::parse_ethernet(frame)?,
-        LinkType::LinuxSll => ethernet::parse_linux_sll(frame)?,
-        LinkType::Raw => match frame.first().map(|b| b >> 4) {
-            Some(4) => (ethernet::ETHERTYPE_IPV4, frame),
-            Some(6) => (ethernet::ETHERTYPE_IPV6, frame),
-            Some(_) => return Err(DecodeError::Malformed),
-            None => return Err(DecodeError::Truncated),
-        },
-    };
+    let (ethertype, l3) = link_payload(link, frame)?;
     let (hdr, v6) = match ethertype {
         ethernet::ETHERTYPE_IPV4 => (ip::parse_ipv4(l3)?, false),
         ethernet::ETHERTYPE_IPV6 => (ip::parse_ipv6(l3)?, true),
         _ => return Err(DecodeError::Unsupported),
     };
-
     let transport = if hdr.non_first_fragment {
         Transport::Other { proto: hdr.proto }
     } else {
-        match (hdr.proto, v6) {
-            (6, _) => {
-                let s = tcp::parse_tcp(hdr.payload)?;
-                Transport::Tcp {
-                    src_port: s.src_port,
-                    dst_port: s.dst_port,
-                    seq: s.seq,
-                    flags: s.flags,
-                    payload: s.payload,
-                }
-            }
-            (17, _) => {
-                let d = udp::parse_udp(hdr.payload)?;
-                Transport::Udp {
-                    src_port: d.src_port,
-                    dst_port: d.dst_port,
-                    payload: d.payload,
-                }
-            }
-            (1, false) | (58, true) => {
-                let (icmp_type, code) = icmp::parse_icmp(hdr.payload)?;
-                Transport::Icmp { icmp_type, code }
-            }
-            (proto, _) => Transport::Other { proto },
-        }
+        decode_transport(hdr.proto, v6, hdr.payload)?
     };
     Ok(Packet {
         src_ip: hdr.src,
         dst_ip: hdr.dst,
         transport,
+    })
+}
+
+/// Remove o cabecalho de enlace e devolve (ethertype, payload L3).
+fn link_payload(link: LinkType, frame: &[u8]) -> Result<(u16, &[u8]), DecodeError> {
+    match link {
+        LinkType::Ethernet => ethernet::parse_ethernet(frame),
+        LinkType::LinuxSll => ethernet::parse_linux_sll(frame),
+        LinkType::Raw => match frame.first().map(|b| b >> 4) {
+            Some(4) => Ok((ethernet::ETHERTYPE_IPV4, frame)),
+            Some(6) => Ok((ethernet::ETHERTYPE_IPV6, frame)),
+            Some(_) => Err(DecodeError::Malformed),
+            None => Err(DecodeError::Truncated),
+        },
+    }
+}
+
+/// Decodifica o cabecalho de camada 4 (`v6` distingue ICMP de ICMPv6).
+fn decode_transport(proto: u8, v6: bool, payload: &[u8]) -> Result<Transport<'_>, DecodeError> {
+    Ok(match (proto, v6) {
+        (6, _) => {
+            let s = tcp::parse_tcp(payload)?;
+            Transport::Tcp {
+                src_port: s.src_port,
+                dst_port: s.dst_port,
+                seq: s.seq,
+                flags: s.flags,
+                payload: s.payload,
+            }
+        }
+        (17, _) => {
+            let d = udp::parse_udp(payload)?;
+            Transport::Udp {
+                src_port: d.src_port,
+                dst_port: d.dst_port,
+                payload: d.payload,
+            }
+        }
+        (1, false) | (58, true) => {
+            let (icmp_type, code) = icmp::parse_icmp(payload)?;
+            Transport::Icmp { icmp_type, code }
+        }
+        (proto, _) => Transport::Other { proto },
     })
 }
 

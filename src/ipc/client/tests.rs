@@ -1,6 +1,7 @@
 use super::*;
 use crate::ipc::framer::{read_frame, write_frame, write_message};
 use psychoscope_proto::v1::HelloResposta;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::net::UnixListener;
 
