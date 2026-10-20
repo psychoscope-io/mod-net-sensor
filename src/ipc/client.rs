@@ -17,6 +17,7 @@ use psychoscope_proto::v1::{
 };
 use tokio::io::AsyncWrite;
 use tokio::net::UnixStream;
+use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep, timeout};
 
@@ -248,18 +249,8 @@ impl<C: Controller> Client<C> {
         events_open: &mut bool,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Result<Exit, SessionError> {
-        let (mut rd, mut wr) = stream.into_split();
-
-        // A leitura nao e cancel-safe: roda em task propria e entrega mensagens por canal.
-        let (in_tx, mut inbox) = mpsc::channel::<MensagemIpc>(16);
-        let reader = tokio::spawn(async move {
-            while let Ok(Some(m)) = read_message(&mut rd, 0).await {
-                if in_tx.send(m).await.is_err() {
-                    break;
-                }
-            }
-        });
-        let _guard = AbortOnDrop(reader);
+        let (rd, mut wr) = stream.into_split();
+        let (mut inbox, _reader_guard) = spawn_reader(rd);
 
         let mut tick = interval(status_every);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -275,16 +266,7 @@ impl<C: Controller> Client<C> {
                     if let Some(exit) = self.handle(m, &mut wr).await? { return Ok(exit); }
                 }
                 ev = events.recv(), if *events_open => match ev {
-                    Some(ev) => {
-                        let m = self.envelope(Payload::Telemetria(EventoTelemetria {
-                            id_modulo: self.cfg.module_id.clone(),
-                            dado: Some(evento_telemetria::Dado::Rede(ev)),
-                        }));
-                        match self.send(&mut wr, &m).await {
-                            Ok(()) => { self.counters.events_sent.fetch_add(1, Relaxed); }
-                            Err(e) => { self.counters.events_dropped.fetch_add(1, Relaxed); return Err(e); }
-                        }
-                    }
+                    Some(ev) => self.send_event(&mut wr, ev).await?,
                     None => {
                         *events_open = false;
                         if self.exit_when_drained {
@@ -300,6 +282,26 @@ impl<C: Controller> Client<C> {
                 }
             }
         }
+    }
+
+    /// Envia um evento de rede como telemetria e atualiza os contadores de enviados/descartados.
+    async fn send_event<W: AsyncWrite + Unpin>(
+        &self,
+        w: &mut W,
+        ev: EventoFluxoRede,
+    ) -> Result<(), SessionError> {
+        let m = self.envelope(Payload::Telemetria(EventoTelemetria {
+            id_modulo: self.cfg.module_id.clone(),
+            dado: Some(evento_telemetria::Dado::Rede(ev)),
+        }));
+        let result = self.send(w, &m).await;
+        let counter = if result.is_ok() {
+            &self.counters.events_sent
+        } else {
+            &self.counters.events_dropped
+        };
+        counter.fetch_add(1, Relaxed);
+        result
     }
 
     fn status(&self, cpu: &mut CpuMeter) -> MensagemIpc {
@@ -372,6 +374,20 @@ impl<C: Controller> Client<C> {
             TipoAcao::AcaoDesconhecida => (Err("acao desconhecida".to_string()), None),
         }
     }
+}
+
+/// A leitura do socket nao e cancel-safe: roda em task propria e entrega as mensagens por
+/// canal. A task e abortada quando o guard e descartado (fim da sessao).
+fn spawn_reader(mut rd: OwnedReadHalf) -> (mpsc::Receiver<MensagemIpc>, AbortOnDrop) {
+    let (tx, rx) = mpsc::channel::<MensagemIpc>(16);
+    let task = tokio::spawn(async move {
+        while let Ok(Some(m)) = read_message(&mut rd, 0).await {
+            if tx.send(m).await.is_err() {
+                break;
+            }
+        }
+    });
+    (rx, AbortOnDrop(task))
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
