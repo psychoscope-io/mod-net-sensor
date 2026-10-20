@@ -66,7 +66,7 @@ jobs:
       - name: checksums
         working-directory: dist
         run: sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*.tar.gz
       - name: criar a release
