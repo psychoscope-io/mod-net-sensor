@@ -5,9 +5,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Os scripts esperam os repositorios como pastas irmas: $HERE/../psychoscope-core.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: mod-net-sensor }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: psychoscope-io/psychoscope-core
           path: psychoscope-core
