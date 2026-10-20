@@ -41,10 +41,22 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/mod-net-sensor
 
 O Core (e o supervisor) seguem sem privilégios. Requer `libpcap-dev` para compilar e `libpcap` para executar.
 
+## Testar em minutos (demo)
+
+`scripts/demo.sh` compila o Core e o sensor, sobe o daemon com um pcap sintético malicioso (sem privilégios e sem tocar na sua rede) e abre a TUI com 10 alertas para você explorar. Requer `go`, `cargo`, `python3` e `libpcap-dev`; se `../psychoscope-core` não existir, o Core é clonado em `~/.cache/psychoscope-demo` (ou aponte um checkout com `PSYCHOSCOPE_CORE`).
+
+```
+git clone https://github.com/psychoscope-io/mod-net-sensor && cd mod-net-sensor
+scripts/demo.sh
+```
+
+Na TUI: `tab` alterna os painéis, `j`/`k` navegam, `p` pausa, `r` retoma e `x` encerra o módulo, `q` sai. O script imprime os comandos da CLI (`list`, `alerts --history`, `metrics`, `cmd`) para usar em outro terminal. O pcap é reproduzido uma vez; ao sair, o estado temporário é apagado.
+
 ## Testes
 
 ```
 cargo test                    # unitários + proptest + mock do Core
+scripts/demo.sh               # demo interativa: daemon + pcap sintético + TUI
 scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 60 eventos, 3 alertas, TUI em pty, comandos, shutdown
 scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn` (sem sudo)
 scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padrão 60); exige nightly

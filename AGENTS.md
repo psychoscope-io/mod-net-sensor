@@ -9,13 +9,14 @@ Sensor de rede do Psychoscope em Rust: **Source → Decode → Sink**. Captura p
 - `src/reassembly.rs`: remontagem estrita de ClientHello TLS em vários segmentos. `src/event.rs`: pacote → `EventoFluxoRede` (política `interesting`: DNS, ClientHello, TCP SYN/RST, ICMP; `all` emite tudo).
 - `src/pipeline.rs`: `decode_loop` e `SensorController`. `src/ipc/`: `framer.rs` e `client.rs` (Hello, reconexão com backoff, status, comandos), com o contrato `Controller`/`StatsSnapshot` em `client/controller.rs`. `src/main.rs` só liga as etapas (captura, decode, cliente, sinais, encerramento).
 - Testes dos módulos grandes ficam ao lado, em `<modulo>/tests.rs` (`ipc/client`, `reassembly`, `capture/sniffer`).
-- `fuzz/` (cargo-fuzz), `scripts/` (`e2e.sh`, `live_smoke.sh`, `fuzz.sh`, `gen_pcap.py`).
+- `fuzz/` (cargo-fuzz), `scripts/` (`demo.sh`, `e2e.sh`, `live_smoke.sh`, `fuzz.sh`, `gen_pcap.py`).
 
 ## Comandos
 
 ```bash
 make hooks              # uma vez por clone: ativa commit-msg, pre-commit e pre-push
 make check              # o que o CI roda: fmt, clippy -D warnings, shellcheck, actionlint, cargo deny, cargo test
+scripts/demo.sh         # demo interativa para quem vai testar (clona o core se faltar); não faz parte do CI
 scripts/e2e.sh          # daemon Go real + pcap sintético; exige ../psychoscope-core
 scripts/live_smoke.sh   # captura ao vivo em `lo` dentro de `unshare -Urn`
 scripts/fuzz.sh 30      # exige nightly e cargo-fuzz
