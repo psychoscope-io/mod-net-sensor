@@ -10,6 +10,8 @@ fi
 
 export PATH="$HOME/.local/go/bin:$PATH"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+# Layout de desenvolvimento (repos irmaos): resolve psychoscope-proto a partir do checkout local.
+[ -f "$HERE/../psychoscope-proto/scripts/local-deps.sh" ] && source "$HERE/../psychoscope-proto/scripts/local-deps.sh"
 CORE="$HERE/../psychoscope-core"
 TMP="$(mktemp -d)"
 DPID=""
