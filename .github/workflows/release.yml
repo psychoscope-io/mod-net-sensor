@@ -1,0 +1,77 @@
+name: release
+# Dispara ao publicar uma tag vX.Y.Z (que deve coincidir com a versao do Cargo.toml). Compila
+# em Ubuntu 22.04 (glibc 2.35, para rodar em distribuicoes mais antigas) para amd64 e arm64,
+# gera SHA256SUMS e atestado de proveniencia, e cria a release no GitHub.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: a tag deve coincidir com a versao do Cargo.toml
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "$want" != "$have" ]; then
+            echo "tag $GITHUB_REF_NAME != versao do Cargo.toml ($have)" >&2
+            exit 1
+          fi
+
+  build:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, arch: amd64 }
+          - { runner: ubuntu-22.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: empacotar
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG="mod-net-sensor_${VERSION}_linux_${{ matrix.arch }}"
+          mkdir -p "dist/$PKG"
+          cp target/release/mod-net-sensor LICENSE README.md "dist/$PKG/"
+          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+          rm -rf "dist/$PKG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sensor-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: sensor-*
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: criar a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

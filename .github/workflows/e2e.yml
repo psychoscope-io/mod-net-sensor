@@ -1,0 +1,27 @@
+name: e2e
+on: [push, pull_request]
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      # Os scripts esperam os repositorios como pastas irmas: $HERE/../psychoscope-core.
+      - uses: actions/checkout@v4
+        with: { path: mod-net-sensor }
+      - uses: actions/checkout@v4
+        with:
+          repository: psychoscope-io/psychoscope-core
+          path: psychoscope-core
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev python3
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: psychoscope-core/go.mod
+          cache-dependency-path: psychoscope-core/go.sum
+      # O runner Ubuntu 24.04 restringe user namespaces nao privilegiados, e o
+      # live_smoke.sh depende de `unshare -Urn`.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: e2e (pcap sintetico)
+        working-directory: mod-net-sensor
+        run: scripts/e2e.sh
+      - name: live smoke (captura em namespace)
+        working-directory: mod-net-sensor
+        run: scripts/live_smoke.sh
