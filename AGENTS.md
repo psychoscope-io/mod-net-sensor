@@ -14,15 +14,14 @@ Sensor de rede do Psychoscope em Rust: **Source → Decode → Sink**. Captura p
 ## Comandos
 
 ```bash
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+make hooks              # uma vez por clone: ativa commit-msg, pre-commit e pre-push
+make check              # o que o CI roda: fmt, clippy -D warnings, shellcheck, actionlint, cargo deny, cargo test
 scripts/e2e.sh          # daemon Go real + pcap sintético; exige ../psychoscope-core
 scripts/live_smoke.sh   # captura ao vivo em `lo` dentro de `unshare -Urn`
 scripts/fuzz.sh 30      # exige nightly e cargo-fuzz
 ```
 
-Requer `libpcap-dev`. O proto vem por `git` + `tag` (`Cargo.lock` fixa o commit); antes de a tag existir no GitHub: `source ../psychoscope-proto/scripts/local-deps.sh`.
+Requer `libpcap-dev`. Ferramentas fora do `Cargo.toml`: `cargo-deny` (`cargo install cargo-deny --locked`), `shellcheck` e `actionlint`; `deny.toml` define licenças e origens permitidas. O proto vem por `git` + `tag` (`Cargo.lock` fixa o commit); antes de a tag existir no GitHub: `source ../psychoscope-proto/scripts/local-deps.sh`.
 
 ## Regras e skills
 
