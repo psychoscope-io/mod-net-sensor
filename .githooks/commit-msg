@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
-# Hook commit-msg: exige Conventional Commits (veja scripts/check-commit-msg.sh).
-ALLOW_FIXUP=1 exec "$(git rev-parse --show-toplevel)/scripts/check-commit-msg.sh" "$1"
+# Hook commit-msg: exige Conventional Commits (veja check-commit-msg.sh).
+root="$(git rev-parse --show-toplevel)"
+dir="$root/scripts"; [ -x "$dir/check-commit-msg.sh" ] || dir="$root/devtools/scripts" # repositorio .github
+ALLOW_FIXUP=1 exec "$dir/check-commit-msg.sh" "$1"
