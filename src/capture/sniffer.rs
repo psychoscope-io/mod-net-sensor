@@ -3,7 +3,7 @@
 //! nao acompanha, o pacote e descartado e contado — a captura nunca bloqueia nem acumula
 //! memoria sem limite no modo ao vivo.
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread::JoinHandle;
@@ -108,51 +108,8 @@ pub fn spawn(
         reconfig: rrx,
     };
     let (join, live) = match &cfg.source {
-        Source::Interface(name) => {
-            let mut cap = Capture::from_device(name.as_str())?
-                .promisc(cfg.promisc)
-                .snaplen(cfg.snaplen)
-                .timeout(READ_TIMEOUT_MS)
-                .immediate_mode(true)
-                .buffer_size(KERNEL_BUFFER_BYTES)
-                .open()?
-                .setnonblock()?; // com immediate_mode o timeout do libpcap pode nao valer: espera via poll(2)
-            if let Some(f) = &cfg.bpf {
-                cap.filter(f, true)?;
-            }
-            let link = link_of(&cap)?;
-            let fd = cap.as_raw_fd();
-            let j = std::thread::Builder::new()
-                .name("pcap-live".into())
-                .spawn(move || {
-                    run(
-                        cap,
-                        link,
-                        true,
-                        ctx,
-                        |c: &mut Capture<Active>| {
-                            c.stats()
-                                .ok()
-                                .map(|s| u64::from(s.dropped) + u64::from(s.if_dropped))
-                        },
-                        move || wait_readable(fd),
-                    )
-                })
-                .map_err(CaptureError::Thread)?;
-            (j, true)
-        }
-        Source::File(path) => {
-            let mut cap = Capture::from_file(path)?;
-            if let Some(f) = &cfg.bpf {
-                cap.filter(f, true)?;
-            }
-            let link = link_of(&cap)?;
-            let j = std::thread::Builder::new()
-                .name("pcap-file".into())
-                .spawn(move || run(cap, link, false, ctx, |_| None, || {}))
-                .map_err(CaptureError::Thread)?;
-            (j, false)
-        }
+        Source::Interface(name) => (spawn_live(cfg, name, ctx)?, true),
+        Source::File(path) => (spawn_file(cfg, path, ctx)?, false),
     };
     Ok(CaptureHandle {
         join,
@@ -162,6 +119,55 @@ pub fn spawn(
         reconfig: rtx,
         live,
     })
+}
+
+type CaptureThread = JoinHandle<Result<(), CaptureError>>;
+
+/// Abre a interface em modo nao bloqueante e inicia a thread de captura ao vivo.
+fn spawn_live(cfg: &CaptureConfig, name: &str, ctx: Ctx) -> Result<CaptureThread, CaptureError> {
+    let mut cap = Capture::from_device(name)?
+        .promisc(cfg.promisc)
+        .snaplen(cfg.snaplen)
+        .timeout(READ_TIMEOUT_MS)
+        .immediate_mode(true)
+        .buffer_size(KERNEL_BUFFER_BYTES)
+        .open()?
+        .setnonblock()?; // com immediate_mode o timeout do libpcap pode nao valer: espera via poll(2)
+    if let Some(f) = &cfg.bpf {
+        cap.filter(f, true)?;
+    }
+    let link = link_of(&cap)?;
+    let fd = cap.as_raw_fd();
+    std::thread::Builder::new()
+        .name("pcap-live".into())
+        .spawn(move || {
+            run(
+                cap,
+                link,
+                true,
+                ctx,
+                |c: &mut Capture<Active>| {
+                    c.stats()
+                        .ok()
+                        .map(|s| u64::from(s.dropped) + u64::from(s.if_dropped))
+                },
+                move || wait_readable(fd),
+            )
+        })
+        .map_err(CaptureError::Thread)
+}
+
+/// Abre o arquivo pcap e inicia a thread de leitura (sem perdas, sem estatisticas do kernel).
+fn spawn_file(cfg: &CaptureConfig, path: &Path, ctx: Ctx) -> Result<CaptureThread, CaptureError> {
+    let mut cap = Capture::from_file(path)?;
+    if let Some(f) = &cfg.bpf {
+        cap.filter(f, true)?;
+    }
+    let link = link_of(&cap)?;
+    std::thread::Builder::new()
+        .name("pcap-file".into())
+        .spawn(move || run(cap, link, false, ctx, |_| None, || {}))
+        .map_err(CaptureError::Thread)
 }
 
 /// Espera ate `fd` ficar legivel ou 100 ms passarem (limite para reavaliar `stop`).
@@ -198,58 +204,81 @@ fn run<T: Activated + ?Sized>(
 ) -> Result<(), CaptureError> {
     let mut last_stats = Instant::now();
     while !ctx.stop.load(Relaxed) {
-        while let Ok(req) = ctx.reconfig.try_recv() {
-            let r = if live {
-                cap.filter(&req.bpf, true).map_err(|e| e.to_string())
-            } else {
-                Err("reconfiguracao nao suportada na leitura de arquivo".to_string())
-            };
-            let _ = req.reply.send(r);
-        }
-
+        apply_reconfig(&mut cap, live, &ctx);
         match cap.next_packet() {
             Ok(p) => {
-                ctx.counters.captured.fetch_add(1, Relaxed);
-                ctx.counters
-                    .bytes
-                    .fetch_add(u64::from(p.header.len), Relaxed);
-                if ctx.paused.load(Relaxed) {
-                    continue; // continua drenando o pcap para nao encher o buffer do kernel
-                }
-                let pkt = Captured {
-                    ts: timestamp(p.header.ts.tv_sec, p.header.ts.tv_usec),
-                    wire_len: p.header.len,
-                    link,
-                    data: p.data.to_vec(),
-                };
-                if live {
-                    match ctx.tx.try_send(pkt) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            ctx.counters.channel_dropped.fetch_add(1, Relaxed);
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => break,
-                    }
-                } else if ctx.tx.blocking_send(pkt).is_err() {
-                    break; // arquivo: sem perdas; consumidor encerrado
+                if forward(&ctx, link, live, &p) == Flow::Stop {
+                    break;
                 }
             }
             Err(PcapError::TimeoutExpired) => idle_wait(),
             Err(PcapError::NoMorePackets) => break,
             Err(e) => return Err(e.into()),
         }
-
         if last_stats.elapsed() >= STATS_EVERY {
             last_stats = Instant::now();
-            if let Some(d) = stats(&mut cap) {
-                ctx.counters.kernel_dropped.store(d, Relaxed);
-            }
+            record_kernel_drops(&ctx, stats(&mut cap));
         }
     }
-    if let Some(d) = stats(&mut cap) {
+    record_kernel_drops(&ctx, stats(&mut cap));
+    Ok(())
+}
+
+#[derive(PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Stop,
+}
+
+/// Atende os pedidos de novo filtro BPF (so na captura ao vivo).
+fn apply_reconfig<T: Activated + ?Sized>(cap: &mut Capture<T>, live: bool, ctx: &Ctx) {
+    while let Ok(req) = ctx.reconfig.try_recv() {
+        let r = if live {
+            cap.filter(&req.bpf, true).map_err(|e| e.to_string())
+        } else {
+            Err("reconfiguracao nao suportada na leitura de arquivo".to_string())
+        };
+        let _ = req.reply.send(r);
+    }
+}
+
+/// Conta o pacote e o entrega ao decodificador. Ao vivo, canal cheio = descarte contado;
+/// arquivo, espera espaco (sem perdas). `Stop` quando o consumidor foi encerrado.
+fn forward(ctx: &Ctx, link: LinkType, live: bool, p: &pcap::Packet<'_>) -> Flow {
+    ctx.counters.captured.fetch_add(1, Relaxed);
+    ctx.counters
+        .bytes
+        .fetch_add(u64::from(p.header.len), Relaxed);
+    if ctx.paused.load(Relaxed) {
+        return Flow::Continue; // continua drenando o pcap para nao encher o buffer do kernel
+    }
+    let pkt = Captured {
+        ts: timestamp(p.header.ts.tv_sec, p.header.ts.tv_usec),
+        wire_len: p.header.len,
+        link,
+        data: p.data.to_vec(),
+    };
+    if !live {
+        return if ctx.tx.blocking_send(pkt).is_err() {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        };
+    }
+    match ctx.tx.try_send(pkt) {
+        Ok(()) => Flow::Continue,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            ctx.counters.channel_dropped.fetch_add(1, Relaxed);
+            Flow::Continue
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Flow::Stop,
+    }
+}
+
+fn record_kernel_drops(ctx: &Ctx, dropped: Option<u64>) {
+    if let Some(d) = dropped {
         ctx.counters.kernel_dropped.store(d, Relaxed);
     }
-    Ok(())
 }
 
 #[cfg(test)]
