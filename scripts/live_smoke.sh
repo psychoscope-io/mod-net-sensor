@@ -26,7 +26,8 @@ ip link set lo up
 cat > "$TMP/cfg.json" <<JSON
 { "status_interval": "1s",
   "modules": [{ "id": "mod-net-sensor", "path": "$HERE/target/debug/mod-net-sensor",
-                "args": ["-i", "lo"], "connect_timeout": "10s", "stop_grace": "5s" }] }
+                "args": ["-i", "lo"], "connect_timeout": "10s", "stop_grace": "5s" }],
+  "storage": { "path": "$TMP/state/alerts.db" } }
 JSON
 CLI="$TMP/psychoscope-cli --ctl-socket $TMP/run/ctl.sock"
 "$TMP/psychoscope" --config "$TMP/cfg.json" --socket "$TMP/run/core.sock" --ctl-socket "$TMP/run/ctl.sock" --log-level debug 2> "$TMP/daemon.log" &
