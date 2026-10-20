@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Hook pre-push: o mesmo conjunto do CI (alvo `check` do Makefile) e as mensagens dos commits a publicar.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+remote_ref="origin/$(git rev-parse --abbrev-ref HEAD)"
+if git rev-parse -q --verify "$remote_ref" >/dev/null; then
+  scripts/check-commits.sh "$remote_ref..HEAD"
+fi
+[ -f Makefile ] && grep -q '^check:' Makefile || exit 0
+exec make -s check
