@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # E2E real: daemon Go (supervisor) lanca o sensor Rust, que reproduz um pcap sintetico e
 # envia a telemetria pelo socket Unix. Valida handshake com SO_PEERCRED, contagem de
-# eventos, comandos (pausar/retomar/reconfigurar/encerrar) e desligamento gracioso.
+# eventos, deteccao (3 alertas esperados), comandos (pausar/retomar/reconfigurar/encerrar) e desligamento gracioso.
 # Requer ../psychoscope-core. Nao exige privilegios (usa --pcap-file).
 set -euo pipefail
 export PATH="$HOME/.local/go/bin:$PATH"
@@ -48,6 +48,21 @@ echo "ok: modulo conectado (handshake + SO_PEERCRED)"
 # O StatusModulo chega a cada 1s; esperamos o total de eventos do pcap.
 wait_for "EVENTOS=$EXPECTED" bash -c "[ \"\$($(declare -f col); CLI='$CLI'; col EVENTOS)\" = '$EXPECTED' ]"
 echo "ok: $EXPECTED eventos recebidos pelo Core"
+
+# Deteccao: o pcap contem varredura vertical, rajada de NXDOMAIN e tunel DNS => exatamente 3 alertas.
+alerts_now() { timeout 2 $CLI alerts > "$TMP/alerts.txt" 2>/dev/null || true; wc -l < "$TMP/alerts.txt"; }
+for _ in $(seq 30); do [ "$(alerts_now)" -ge 3 ] && break; sleep 0.2; done
+cat "$TMP/alerts.txt"
+[ "$(wc -l < "$TMP/alerts.txt")" = 3 ] || fail "esperado exatamente 3 alertas, obtido $(wc -l < "$TMP/alerts.txt")"
+for r in net.scan.syn net.dns.nxdomain_burst net.dns.tunnel; do
+  grep -q "$r" "$TMP/alerts.txt" || fail "alerta $r ausente"
+done
+grep -q "10.0.0.77" "$TMP/alerts.txt" || fail "origem da varredura (10.0.0.77) ausente"
+grep -q "exfil.example" "$TMP/alerts.txt" || fail "dominio do tunel ausente"
+echo "ok: 3 alertas (varredura SYN, NXDOMAIN burst, tunel DNS) e nenhum falso positivo"
+
+# TUI num pseudo-terminal real: deve mostrar o modulo conectado e os alertas.
+python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE mod-net-sensor CONECTADO "Alertas (3)" net.scan.syn net.dns.tunnel || fail "TUI"
 grep -q "telemetria recebida" "$TMP/daemon.log" || fail "core nao registrou telemetria"
 $CLI list
 

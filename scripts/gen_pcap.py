@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gera um pcap sintetico (Ethernet) para o e2e e imprime o numero de eventos esperado
 com a politica 'interesting'. Uso: gen_pcap.py <saida.pcap>"""
-import socket, ssl, struct, sys
+import random, socket, ssl, struct, sys
 
 def mac(n): return bytes([2, 0, 0, 0, 0, n])
 def eth(l3, ethertype, vlan=None):
@@ -59,8 +59,21 @@ add(eth(ip4(6, tcp(52000, 80, PSH | ACK, b"GET / HTTP/1.1\r\n\r\n")), 0x0800), 0
 add(eth(ip4(17, udp(1000, 2000, b"ruido")), 0x0800), 0)                                 # UDP generico: ignorado
 add(eth(b"\0" * 28, 0x0806), 0)                                                          # ARP: nao suportado
 
+# --- trafego malicioso (deve gerar exatamente 3 alertas) ---
+rng = random.Random(1)
+for port in range(1000, 1025):                 # varredura vertical: 25 portas de 10.0.0.2 por 10.0.0.77
+    add(eth(ip4(6, tcp(41000, port, SYN), "10.0.0.77", "10.0.0.2"), 0x0800), 1)
+for i in range(12):                            # rajada de NXDOMAIN (DGA) para o cliente 10.0.0.1
+    d = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(12)) + ".example"
+    add(eth(ip4(17, udp(53, 52000 + i, dns_resp(d, 3, [])), "10.0.0.2", "10.0.0.1"), 0x0800), 1)
+B32 = "abcdefghijklmnopqrstuvwxyz234567"
+for i in range(6):                             # tunel DNS: rotulos base32 de 48 chars sob t.exfil.example
+    label = "".join(rng.choice(B32) for _ in range(48))
+    add(eth(ip4(17, udp(53000 + i, 53, dns_query(label + ".t.exfil.example")), "10.0.0.88", "10.0.0.2"), 0x0800), 1)
+
 with open(sys.argv[1], "wb") as f:
     f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
     for i, p in enumerate(packets):
-        f.write(struct.pack("<IIII", 1_700_000_000 + i, 0, len(p), len(p)) + p)
+        t = 1_700_000_000 * 1_000_000 + i * 100_000   # 100 ms entre pacotes
+        f.write(struct.pack("<IIII", t // 1_000_000, t % 1_000_000, len(p), len(p)) + p)
 print(expected)

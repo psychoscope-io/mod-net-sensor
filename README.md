@@ -37,7 +37,7 @@ O Core (e o supervisor) seguem sem privilégios. Requer `libpcap-dev` para compi
 
 ```
 cargo test                    # unitários + proptest + mock do Core
-scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 17 eventos, comandos, shutdown
+scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 60 eventos, 3 alertas, TUI em pty, comandos, shutdown
 scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn` (sem sudo)
 ```
 
