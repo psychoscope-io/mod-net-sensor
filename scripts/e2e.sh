@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # E2E real: daemon Go (supervisor) lanca o sensor Rust, que reproduz um pcap sintetico e
 # envia a telemetria pelo socket Unix. Valida handshake com SO_PEERCRED, contagem de
-# eventos, deteccao (3 alertas esperados), comandos (pausar/retomar/reconfigurar/encerrar) e desligamento gracioso.
+# eventos, deteccao (conjunto EXATO de 10 alertas, sem extras), metricas, persistencia (o historico volta apos
+# reiniciar o daemon), TUI, comandos (pausar/retomar/reconfigurar/encerrar) e desligamento gracioso.
 # Requer ../psychoscope-core. Nao exige privilegios (usa --pcap-file).
 set -euo pipefail
 export PATH="$HOME/.local/go/bin:$PATH"
@@ -29,7 +30,8 @@ cat > "$TMP/cfg.json" <<JSON
     "args": ["--pcap-file", "$TMP/t.pcap"],
     "connect_timeout": "10s",
     "stop_grace": "5s"
-  }]
+  }],
+  "storage": { "path": "$TMP/state/alerts.db" }
 }
 JSON
 CLI="$TMP/psychoscope-cli --ctl-socket $TMP/run/ctl.sock"
@@ -51,20 +53,31 @@ echo "ok: modulo conectado (handshake + SO_PEERCRED)"
 wait_for "EVENTOS=$EXPECTED" bash -c "[ \"\$($(declare -f col); CLI='$CLI'; col EVENTOS)\" = '$EXPECTED' ]"
 echo "ok: $EXPECTED eventos recebidos pelo Core"
 
-# Deteccao: o pcap contem varredura vertical, rajada de NXDOMAIN e tunel DNS => exatamente 3 alertas.
+# Deteccao: o pcap malicioso deve gerar EXATAMENTE estes 10 alertas (nenhum falso positivo
+# no trafego benigno e nenhum extra).
+EXPECTED_ALERTS=10
 alerts_now() { timeout 2 $CLI alerts > "$TMP/alerts.txt" 2>/dev/null || true; wc -l < "$TMP/alerts.txt"; }
-for _ in $(seq 30); do [ "$(alerts_now)" -ge 3 ] && break; sleep 0.2; done
+for _ in $(seq 40); do [ "$(alerts_now)" -ge $EXPECTED_ALERTS ] && break; sleep 0.2; done
 cat "$TMP/alerts.txt"
-[ "$(wc -l < "$TMP/alerts.txt")" = 3 ] || fail "esperado exatamente 3 alertas, obtido $(wc -l < "$TMP/alerts.txt")"
-for r in net.scan.syn net.dns.nxdomain_burst net.dns.tunnel; do
-  grep -q "$r" "$TMP/alerts.txt" || fail "alerta $r ausente"
+[ "$(wc -l < "$TMP/alerts.txt")" = $EXPECTED_ALERTS ] || fail "esperado exatamente $EXPECTED_ALERTS alertas, obtido $(wc -l < "$TMP/alerts.txt")"
+awk '{sub(/:$/,"",$4); print $4}' "$TMP/alerts.txt" | sort | uniq -c | awk '{print $2"="$1}' | tr '\n' ' ' > "$TMP/by_rule.txt"
+WANT="net.beacon=1 net.bruteforce.auth=1 net.dns.nxdomain_burst=1 net.dns.rate=1 net.dns.tunnel=1 net.icmp.sweep=1 net.scan.syn=1 net.tls.suspicious=3 "
+[ "$(cat "$TMP/by_rule.txt")" = "$WANT" ] || fail "alertas por regra: [$(cat "$TMP/by_rule.txt")] esperado [$WANT]"
+for needle in "10.0.0.77" "exfil.example" "10.0.0.99" "10.0.0.55" "10.0.0.44" "10.0.0.60" \
+              "SNI igual a um IP (93.184.216.34)" "oferece no maximo TLS1.0" "SNI igual a um IP (198.51.100.77)"; do
+  grep -qF "$needle" "$TMP/alerts.txt" || fail "alerta com '$needle' ausente"
 done
-grep -q "10.0.0.77" "$TMP/alerts.txt" || fail "origem da varredura (10.0.0.77) ausente"
-grep -q "exfil.example" "$TMP/alerts.txt" || fail "dominio do tunel ausente"
-echo "ok: 3 alertas (varredura SYN, NXDOMAIN burst, tunel DNS) e nenhum falso positivo"
+echo "ok: 10 alertas exatos (scan, NXDOMAIN, tunel DNS, forca bruta, ICMP sweep, beacon, pico DNS e 3x TLS - um deles so existe se o ClientHello fragmentado foi remontado)"
+
+# Metricas via ctl.sock
+$CLI metrics > "$TMP/metrics.txt"
+grep -q "^psychoscope_engine_alerts_total  *10$" "$TMP/metrics.txt" || fail "metrica de alertas: $(grep alerts_total "$TMP/metrics.txt")"
+grep -q "^psychoscope_module_up{module=mod-net-sensor}  *1$" "$TMP/metrics.txt" || fail "metrica module_up ausente"
+grep -q "^psychoscope_engine_events_processed_total  *$EXPECTED$" "$TMP/metrics.txt" || fail "eventos processados no motor != $EXPECTED: $(grep events_processed "$TMP/metrics.txt")"
+echo "ok: metricas ($EXPECTED eventos processados, 10 alertas)"
 
 # TUI num pseudo-terminal real: deve mostrar o modulo conectado e os alertas.
-python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE mod-net-sensor CONECTADO "Alertas (3)" net.scan.syn net.dns.tunnel || fail "TUI"
+python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE mod-net-sensor CONECTADO "Alertas (10)" net.scan.syn net.dns.tunnel "ev/s" || fail "TUI"
 grep -q "telemetria recebida" "$TMP/daemon.log" || fail "core nao registrou telemetria"
 $CLI list
 
@@ -88,4 +101,23 @@ echo "ok: ENCERRAR graceful (processo $PID terminou, sem restart)"
 
 kill -TERM "$DPID"; wait "$DPID"; RC=$?; DPID=""
 [ "$RC" = 0 ] || fail "daemon saiu com $RC"
+echo "ok: shutdown gracioso do daemon"
+
+# Persistencia: um daemon NOVO, sem modulos, ainda conhece os 10 alertas (SQLite).
+cat > "$TMP/cfg2.json" <<JSON
+{ "status_interval": "1s", "storage": { "path": "$TMP/state/alerts.db" } }
+JSON
+[ "$(stat -c %a "$TMP/state/alerts.db")" = 600 ] || fail "banco de alertas deve ter modo 0600"
+"$TMP/psychoscope" --config "$TMP/cfg2.json" --socket "$TMP/run/core.sock" --ctl-socket "$TMP/run/ctl.sock" --log-level debug 2> "$TMP/daemon2.log" &
+DPID=$!
+wait_for "ctl.sock apos reinicio" bash -c "$CLI list"
+$CLI alerts --history -n 100 > "$TMP/hist.txt"
+tail -1 "$TMP/hist.txt" | grep -qx -- "-- 10 de 10 alertas --" || fail "historico apos reinicio: $(tail -1 "$TMP/hist.txt")"
+$CLI alerts --history --min-severity alta | tail -1 | grep -qx -- "-- 2 de 2 alertas --" || fail "filtro de severidade no historico"
+$CLI alerts --history --rule net.tls.suspicious | tail -1 | grep -qx -- "-- 3 de 3 alertas --" || fail "filtro de regra no historico"
+# o timestamp do alerta e o instante da deteccao (nao o do pcap, de 2023): todos entram em --since 1h
+$CLI alerts --history --since 1h | tail -1 | grep -qx -- "-- 10 de 10 alertas --" || fail "filtro --since 1h"
+python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE "Alertas (10)" net.beacon net.bruteforce.auth || fail "TUI apos reinicio"
+echo "ok: 10 alertas recuperados do SQLite apos reiniciar o daemon (CLI e TUI)"
+kill -TERM "$DPID"; wait "$DPID"; DPID=""
 echo "E2E OK"
