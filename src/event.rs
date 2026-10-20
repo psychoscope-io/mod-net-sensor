@@ -71,65 +71,72 @@ pub fn build_event(
         timestamp_captura: Some(to_timestamp(ts)),
         ..Default::default()
     };
-
-    match &pkt.transport {
+    let keep = match &pkt.transport {
         Transport::Tcp {
             src_port,
             dst_port,
             flags,
             payload,
             ..
-        } => {
-            ev.protocolo = ProtocoloTransporte::ProtoTcp as i32;
-            ev.porta_origem = u32::from(*src_port);
-            ev.porta_destino = u32::from(*dst_port);
-            ev.flags_tcp = u32::from(*flags);
-            if *src_port == DNS_PORT || *dst_port == DNS_PORT {
-                ev.metadados_l7 = dns_over_tcp(payload).map(dns_meta);
-            }
-            if ev.metadados_l7.is_none()
-                && let Some(ch) = tls::parse_client_hello(payload)
-            {
-                ev.metadados_l7 = Some(MetadadosL7::Tls(MetadadosTls {
-                    sni_hostname: ch.sni.unwrap_or_default(),
-                    versao_tls: ch.version.to_string(),
-                }));
-            }
-            let interesting = ev.metadados_l7.is_some() || flags & (tcp::SYN | tcp::RST) != 0;
-            (all || interesting).then_some(ev)
-        }
+        } => fill_tcp(&mut ev, (*src_port, *dst_port), *flags, payload),
         Transport::Udp {
             src_port,
             dst_port,
             payload,
-        } => {
-            ev.protocolo = ProtocoloTransporte::ProtoUdp as i32;
-            ev.porta_origem = u32::from(*src_port);
-            ev.porta_destino = u32::from(*dst_port);
-            if *src_port == DNS_PORT || *dst_port == DNS_PORT {
-                ev.metadados_l7 = dns::parse_dns(payload).ok().map(dns_meta);
-            }
-            (all || ev.metadados_l7.is_some()).then_some(ev)
-        }
-        Transport::Icmp { icmp_type, code } => {
-            ev.protocolo = ProtocoloTransporte::ProtoIcmp as i32;
-            ev.icmp_tipo = u32::from(*icmp_type);
-            ev.icmp_codigo = u32::from(*code);
-            Some(ev)
-        }
+        } => fill_udp(&mut ev, (*src_port, *dst_port), payload),
+        Transport::Icmp { icmp_type, code } => fill_icmp(&mut ev, *icmp_type, *code),
         Transport::Other { .. } => {
             ev.protocolo = ProtocoloTransporte::ProtoDesconhecido as i32;
-            all.then_some(ev)
+            false
         }
-    }
+    };
+    (all || keep).then_some(ev)
 }
 
-/// Como `build_event`, mas remonta ClientHello TLS partido em varios segmentos TCP.
-///
-/// Enquanto o registro nao completa, o fragmento retido nao carrega metadados TLS (evita um
-/// evento sem SNI por fragmento); quando completa, o evento do ultimo segmento usa o registro
-/// inteiro. O restante do evento (tamanho, flags, timestamp) continua sendo o do pacote.
-/// `truncated`: o snaplen cortou o pacote (capturado < `wire_len`).
+fn is_dns_port((src, dst): (u16, u16)) -> bool {
+    src == DNS_PORT || dst == DNS_PORT
+}
+
+/// Preenche os campos TCP e o L7 (DNS sobre TCP ou ClientHello). Devolve se o pacote e
+/// "interessante" para a politica padrao: tem metadados L7 ou e SYN/RST.
+fn fill_tcp(ev: &mut EventoFluxoRede, ports: (u16, u16), flags: u8, payload: &[u8]) -> bool {
+    ev.protocolo = ProtocoloTransporte::ProtoTcp as i32;
+    ev.porta_origem = u32::from(ports.0);
+    ev.porta_destino = u32::from(ports.1);
+    ev.flags_tcp = u32::from(flags);
+    if is_dns_port(ports) {
+        ev.metadados_l7 = dns_over_tcp(payload).map(dns_meta);
+    }
+    if ev.metadados_l7.is_none()
+        && let Some(ch) = tls::parse_client_hello(payload)
+    {
+        ev.metadados_l7 = Some(MetadadosL7::Tls(MetadadosTls {
+            sni_hostname: ch.sni.unwrap_or_default(),
+            versao_tls: ch.version.to_string(),
+        }));
+    }
+    ev.metadados_l7.is_some() || flags & (tcp::SYN | tcp::RST) != 0
+}
+
+/// Preenche os campos UDP e o DNS. "Interessante" = tem metadados DNS.
+fn fill_udp(ev: &mut EventoFluxoRede, ports: (u16, u16), payload: &[u8]) -> bool {
+    ev.protocolo = ProtocoloTransporte::ProtoUdp as i32;
+    ev.porta_origem = u32::from(ports.0);
+    ev.porta_destino = u32::from(ports.1);
+    if is_dns_port(ports) {
+        ev.metadados_l7 = dns::parse_dns(payload).ok().map(dns_meta);
+    }
+    ev.metadados_l7.is_some()
+}
+
+/// ICMP e sempre "interessante".
+fn fill_icmp(ev: &mut EventoFluxoRede, icmp_type: u8, code: u8) -> bool {
+    ev.protocolo = ProtocoloTransporte::ProtoIcmp as i32;
+    ev.icmp_tipo = u32::from(icmp_type);
+    ev.icmp_codigo = u32::from(code);
+    true
+}
+
 pub fn build_event_reassembling(
     reasm: &mut Reassembler,
     pkt: &Packet<'_>,
@@ -164,27 +171,37 @@ pub fn build_event_reassembling(
     let now = ts
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
-    let reassembled;
-    let tls_payload: &[u8] = match reasm.feed(now, key, seg) {
-        Outcome::Passthrough => payload,
-        Outcome::Pending => &[],
-        Outcome::Complete(rec) => {
-            reassembled = rec;
-            &reassembled
-        }
-    };
-    let view = Packet {
-        src_ip: pkt.src_ip,
-        dst_ip: pkt.dst_ip,
-        transport: Transport::Tcp {
+    match reasm.feed(now, key, seg) {
+        Outcome::Passthrough => build_event(pkt, ts, wire_len, policy),
+        // fragmento retido: o evento sai quando o registro completar
+        Outcome::Pending => build_event(&with_payload(pkt, &[]), ts, wire_len, policy),
+        Outcome::Complete(record) => build_event(&with_payload(pkt, &record), ts, wire_len, policy),
+    }
+}
+
+/// Visao do pacote TCP com o payload trocado (o registro remontado, ou vazio).
+fn with_payload<'a>(pkt: &Packet<'_>, payload: &'a [u8]) -> Packet<'a> {
+    let transport = match &pkt.transport {
+        Transport::Tcp {
+            src_port,
+            dst_port,
+            seq,
+            flags,
+            ..
+        } => Transport::Tcp {
             src_port: *src_port,
             dst_port: *dst_port,
             seq: *seq,
             flags: *flags,
-            payload: tls_payload,
+            payload,
         },
+        _ => unreachable!("with_payload so e chamada para segmentos TCP"),
     };
-    build_event(&view, ts, wire_len, policy)
+    Packet {
+        src_ip: pkt.src_ip,
+        dst_ip: pkt.dst_ip,
+        transport,
+    }
 }
 
 #[cfg(test)]
