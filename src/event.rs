@@ -1,5 +1,5 @@
 //! Converte pacotes decodificados em `EventoFluxoRede` (contrato psychoscope.v1).
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use prost_types::Timestamp;
 use psychoscope_proto::v1::{
@@ -12,6 +12,7 @@ use crate::protocols::{
     dns::{self, DnsInfo},
     tcp, tls,
 };
+use crate::reassembly::{FlowKey, Outcome, Reassembler, Segment};
 
 /// Quais pacotes viram evento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -77,6 +78,7 @@ pub fn build_event(
             dst_port,
             flags,
             payload,
+            ..
         } => {
             ev.protocolo = ProtocoloTransporte::ProtoTcp as i32;
             ev.porta_origem = u32::from(*src_port);
@@ -120,6 +122,69 @@ pub fn build_event(
             all.then_some(ev)
         }
     }
+}
+
+/// Como `build_event`, mas remonta ClientHello TLS partido em varios segmentos TCP.
+///
+/// Enquanto o registro nao completa, o fragmento retido nao carrega metadados TLS (evita um
+/// evento sem SNI por fragmento); quando completa, o evento do ultimo segmento usa o registro
+/// inteiro. O restante do evento (tamanho, flags, timestamp) continua sendo o do pacote.
+/// `truncated`: o snaplen cortou o pacote (capturado < `wire_len`).
+pub fn build_event_reassembling(
+    reasm: &mut Reassembler,
+    pkt: &Packet<'_>,
+    ts: SystemTime,
+    wire_len: u64,
+    truncated: bool,
+    policy: EmitPolicy,
+) -> Option<EventoFluxoRede> {
+    let Transport::Tcp {
+        src_port,
+        dst_port,
+        seq,
+        flags,
+        payload,
+    } = &pkt.transport
+    else {
+        return build_event(pkt, ts, wire_len, policy);
+    };
+    let key = FlowKey {
+        src_ip: pkt.src_ip,
+        src_port: *src_port,
+        dst_ip: pkt.dst_ip,
+        dst_port: *dst_port,
+    };
+    let seg = Segment {
+        seq: *seq,
+        flags: *flags,
+        payload,
+        truncated,
+    };
+    // relogio dos pacotes; antes da epoca conta como zero
+    let now = ts
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let reassembled;
+    let tls_payload: &[u8] = match reasm.feed(now, key, seg) {
+        Outcome::Passthrough => payload,
+        Outcome::Pending => &[],
+        Outcome::Complete(rec) => {
+            reassembled = rec;
+            &reassembled
+        }
+    };
+    let view = Packet {
+        src_ip: pkt.src_ip,
+        dst_ip: pkt.dst_ip,
+        transport: Transport::Tcp {
+            src_port: *src_port,
+            dst_port: *dst_port,
+            seq: *seq,
+            flags: *flags,
+            payload: tls_payload,
+        },
+    };
+    build_event(&view, ts, wire_len, policy)
 }
 
 #[cfg(test)]

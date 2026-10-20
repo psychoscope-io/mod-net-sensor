@@ -159,6 +159,37 @@ pub(crate) mod tests {
         rec
     }
 
+    /// ClientHello com uma extensao de padding de `pad` bytes antes das demais: o SNI fica
+    /// depois do enchimento (como nos hellos com chave pos-quantica) e o registro passa de `pad`.
+    pub fn client_hello_padded(sni: &str, pad: usize) -> Vec<u8> {
+        let mut ch = client_hello(Some(sni), &[0x0304]);
+        // 5 (registro) + 4 (handshake) + 2 (versao) + 32 (random) + 1 (sid) + 6 (suites) + 2 (compressao)
+        let ext_len_pos = 52;
+        let mut padding = vec![0x00, 0x15];
+        padding.extend((pad as u16).to_be_bytes());
+        padding.extend(vec![0u8; pad]);
+        let ext_total = u16::from_be_bytes([ch[ext_len_pos], ch[ext_len_pos + 1]]) as usize;
+        let record_len = u16::from_be_bytes([ch[3], ch[4]]) as usize + padding.len();
+        ch.splice(ext_len_pos + 2..ext_len_pos + 2, padding.iter().copied());
+        let new_ext = (ext_total + padding.len()) as u16;
+        ch[ext_len_pos..ext_len_pos + 2].copy_from_slice(&new_ext.to_be_bytes());
+        ch[3..5].copy_from_slice(&(record_len as u16).to_be_bytes());
+        ch[6..9].copy_from_slice(&((record_len - 4) as u32).to_be_bytes()[1..]);
+        ch
+    }
+
+    #[test]
+    fn padded_client_hello_keeps_sni_after_the_padding() {
+        let p = client_hello_padded("late.example", 3000);
+        assert_eq!(5 + usize::from(u16::from_be_bytes([p[3], p[4]])), p.len());
+        assert_eq!(
+            parse_client_hello(&p).unwrap().sni.as_deref(),
+            Some("late.example")
+        );
+        // cortado antes do fim do enchimento: ClientHello valido, mas sem SNI
+        assert_eq!(parse_client_hello(&p[..1400]).unwrap().sni, None);
+    }
+
     #[test]
     fn sni_and_tls13_via_supported_versions_ignoring_grease() {
         let p = client_hello(Some("WWW.Example.com"), &[0x0a0a, 0x0304, 0x0303]);

@@ -12,6 +12,8 @@ pub const URG: u8 = 0x20;
 pub struct TcpSegment<'a> {
     pub src_port: u16,
     pub dst_port: u16,
+    /// Numero de sequencia do primeiro byte do payload (SYN consome um numero extra, nao tratado aqui).
+    pub seq: u32,
     /// Bitmask FIN/SYN/RST/PSH/ACK/URG (contrato do `flags_tcp`).
     pub flags: u8,
     pub payload: &'a [u8],
@@ -21,7 +23,8 @@ pub fn parse_tcp(buf: &[u8]) -> Result<TcpSegment<'_>, DecodeError> {
     let mut r = Reader::new(buf);
     let src_port = r.u16().ok_or(DecodeError::Truncated)?;
     let dst_port = r.u16().ok_or(DecodeError::Truncated)?;
-    r.skip(8).ok_or(DecodeError::Truncated)?; // seq + ack
+    let seq = r.u32().ok_or(DecodeError::Truncated)?;
+    r.skip(4).ok_or(DecodeError::Truncated)?; // ack
     let off_flags = r.u16().ok_or(DecodeError::Truncated)?;
     let hdr_len = usize::from(off_flags >> 12) * 4;
     if hdr_len < 20 {
@@ -33,6 +36,7 @@ pub fn parse_tcp(buf: &[u8]) -> Result<TcpSegment<'_>, DecodeError> {
     Ok(TcpSegment {
         src_port,
         dst_port,
+        seq,
         flags: (off_flags & 0x3f) as u8,
         payload: &buf[hdr_len..],
     })
@@ -43,10 +47,15 @@ pub(crate) mod tests {
     use super::*;
 
     pub fn tcp(sp: u16, dp: u16, flags: u8, payload: &[u8]) -> Vec<u8> {
+        tcp_seq(sp, dp, 0, flags, payload)
+    }
+
+    pub fn tcp_seq(sp: u16, dp: u16, seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
         let mut p = Vec::new();
         p.extend(sp.to_be_bytes());
         p.extend(dp.to_be_bytes());
-        p.extend([0; 8]);
+        p.extend(seq.to_be_bytes());
+        p.extend([0; 4]);
         p.extend([0x50, flags]);
         p.extend([0xff, 0xff, 0, 0, 0, 0]);
         p.extend(payload);
@@ -61,6 +70,17 @@ pub(crate) mod tests {
             (s.src_port, s.dst_port, s.flags, s.payload),
             (40000, 443, SYN | ACK, &b"hi"[..])
         );
+    }
+
+    #[test]
+    fn exposes_sequence_number_and_ignores_ack_number() {
+        let mut p = tcp_seq(1, 2, 0xdead_beef, ACK, b"x");
+        assert_eq!(parse_tcp(&p).unwrap().seq, 0xdead_beef);
+        p[8..12].copy_from_slice(&[0xff; 4]); // ack nao influencia
+        assert_eq!(parse_tcp(&p).unwrap().seq, 0xdead_beef);
+        assert_eq!(parse_tcp(&tcp(1, 2, 0, &[])).unwrap().seq, 0);
+        // truncado dentro do campo seq
+        assert!(matches!(parse_tcp(&p[..6]), Err(DecodeError::Truncated)));
     }
 
     #[test]

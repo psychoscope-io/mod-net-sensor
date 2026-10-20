@@ -1,0 +1,30 @@
+name: fuzz
+# Fuzzing e lento e exige nightly: roda toda semana (e sob demanda), nao a cada push.
+on:
+  schedule:
+    - cron: "17 3 * * 1" # segundas, 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Segundos por alvo"
+        default: "300"
+permissions:
+  contents: read
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz
+        run: scripts/fuzz.sh "${{ inputs.seconds || '300' }}"
+      - name: Artefatos de crash
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

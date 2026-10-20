@@ -7,9 +7,10 @@ use psychoscope_proto::v1::EventoFluxoRede;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::capture::sniffer::{CaptureCounters, Captured, ReconfigRequest};
-use crate::event::{EmitPolicy, build_event};
+use crate::event::{EmitPolicy, build_event_reassembling};
 use crate::ipc::client::{Controller, StatsSnapshot};
 use crate::protocols::decode_frame;
+use crate::reassembly::Reassembler;
 
 #[derive(Default, Debug)]
 pub struct PipelineCounters {
@@ -28,6 +29,7 @@ pub async fn decode_loop(
     lossless: bool,
     counters: Arc<PipelineCounters>,
 ) {
+    let mut reasm = Reassembler::new();
     while let Some(p) = rx.recv().await {
         let pkt = match decode_frame(p.link, &p.data) {
             Ok(pkt) => pkt,
@@ -36,7 +38,15 @@ pub async fn decode_loop(
                 continue;
             }
         };
-        let Some(ev) = build_event(&pkt, p.ts, u64::from(p.wire_len), policy) else {
+        let truncated = p.data.len() < p.wire_len as usize;
+        let Some(ev) = build_event_reassembling(
+            &mut reasm,
+            &pkt,
+            p.ts,
+            u64::from(p.wire_len),
+            truncated,
+            policy,
+        ) else {
             continue;
         };
         if lossless {
@@ -105,8 +115,9 @@ impl Controller for SensorController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::{LinkType, testutil::*};
-    use std::time::SystemTime;
+    use crate::protocols::{LinkType, tcp, testutil::*};
+    use psychoscope_proto::v1::evento_fluxo_rede::MetadadosL7;
+    use std::time::{Duration, SystemTime};
 
     fn cap(frame: Vec<u8>) -> Captured {
         Captured {
@@ -142,6 +153,138 @@ mod tests {
         assert!(erx.recv().await.is_some());
         assert!(erx.recv().await.is_none(), "so um evento esperado");
         assert_eq!(counters.decode_errors.load(Relaxed), 2);
+    }
+
+    fn cap_at(frame: Vec<u8>, secs: u64) -> Captured {
+        Captured {
+            ts: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+            ..cap(frame)
+        }
+    }
+
+    /// Frame TCP 10.0.0.1:40000 -> 10.0.0.2:443 com `seq` e `payload` dados.
+    fn seg_frame(seq: u32, payload: &[u8]) -> Vec<u8> {
+        eth_v4(6, &tcp_seq(40000, 443, seq, tcp::PSH | tcp::ACK, payload))
+    }
+
+    async fn run(packets: Vec<Captured>, policy: EmitPolicy) -> Vec<EventoFluxoRede> {
+        let (ptx, prx) = mpsc::channel(packets.len().max(1));
+        let (etx, mut erx) = mpsc::channel(packets.len().max(1));
+        for p in packets {
+            ptx.send(p).await.unwrap();
+        }
+        drop(ptx);
+        decode_loop(
+            prx,
+            etx,
+            policy,
+            true,
+            Arc::new(PipelineCounters::default()),
+        )
+        .await;
+        let mut out = Vec::new();
+        while let Some(e) = erx.recv().await {
+            out.push(e);
+        }
+        out
+    }
+
+    fn sni(e: &EventoFluxoRede) -> Option<&str> {
+        match &e.metadados_l7 {
+            Some(MetadadosL7::Tls(t)) => Some(t.sni_hostname.as_str()),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn fragmented_client_hello_yields_one_event_with_sni_from_second_segment() {
+        let h = client_hello_padded("quantum.example", 3000);
+        assert!(h.len() > 3000);
+        let evs = run(
+            vec![
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+                cap_at(seg_frame(2400, &h[1400..]), 10),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        assert_eq!(evs.len(), 1, "um evento por handshake, nao por fragmento");
+        assert_eq!(sni(&evs[0]), Some("quantum.example"));
+        assert_eq!(evs[0].flags_tcp, u32::from(tcp::PSH | tcp::ACK));
+        // tamanho e o do ultimo pacote, nao o do registro remontado
+        assert_eq!(
+            evs[0].tamanho_bytes,
+            seg_frame(2400, &h[1400..]).len() as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn fragments_without_reassembly_carry_no_tls_metadata_under_all() {
+        let h = client_hello_padded("quantum.example", 3000);
+        let evs = run(
+            vec![
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+                cap_at(seg_frame(2400, &h[1400..]), 10),
+            ],
+            EmitPolicy::All,
+        )
+        .await;
+        assert_eq!(evs.len(), 2);
+        assert_eq!(sni(&evs[0]), None);
+        assert_eq!(sni(&evs[1]), Some("quantum.example"));
+    }
+
+    #[tokio::test]
+    async fn out_of_order_or_orphan_fragments_emit_nothing() {
+        let h = client_hello_padded("quantum.example", 3000);
+        // fora de ordem: o 2o segmento chega antes do 1o -> descartado
+        let evs = run(
+            vec![
+                cap_at(seg_frame(2400, &h[1400..]), 10),
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        assert!(evs.is_empty());
+        // segundo segmento chega depois do TTL de 5 s (tempo dos pacotes)
+        let evs = run(
+            vec![
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+                cap_at(seg_frame(2400, &h[1400..]), 16),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        assert!(evs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_segment_client_hello_is_unchanged() {
+        let h = client_hello(Some("one.example"), &[0x0304]);
+        let evs = run(vec![cap(seg_frame(1, &h))], EmitPolicy::Interesting).await;
+        assert_eq!(evs.len(), 1);
+        assert_eq!(sni(&evs[0]), Some("one.example"));
+    }
+
+    #[tokio::test]
+    async fn interleaved_flows_are_reassembled_independently() {
+        let a = client_hello_padded("a.example", 3000);
+        let b = client_hello_padded("b.example", 3000);
+        let fa = |seq: u32, d: &[u8]| eth_v4(6, &tcp_seq(40000, 443, seq, tcp::ACK, d));
+        let fb = |seq: u32, d: &[u8]| eth_v4(6, &tcp_seq(40001, 443, seq, tcp::ACK, d));
+        let evs = run(
+            vec![
+                cap(fa(1, &a[..1400])),
+                cap(fb(77, &b[..1000])),
+                cap(fa(1401, &a[1400..])),
+                cap(fb(1077, &b[1000..])),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        let names: Vec<_> = evs.iter().map(|e| sni(e).unwrap()).collect();
+        assert_eq!(names, ["a.example", "b.example"]);
     }
 
     #[tokio::test]

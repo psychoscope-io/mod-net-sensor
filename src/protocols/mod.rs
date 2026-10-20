@@ -48,6 +48,8 @@ pub enum Transport<'a> {
     Tcp {
         src_port: u16,
         dst_port: u16,
+        /// Numero de sequencia do primeiro byte de `payload`.
+        seq: u32,
         flags: u8,
         payload: &'a [u8],
     },
@@ -95,6 +97,7 @@ pub fn decode_frame(link: LinkType, frame: &[u8]) -> Result<Packet<'_>, DecodeEr
                 Transport::Tcp {
                     src_port: s.src_port,
                     dst_port: s.dst_port,
+                    seq: s.seq,
                     flags: s.flags,
                     payload: s.payload,
                 }
@@ -126,8 +129,8 @@ pub fn decode_frame(link: LinkType, frame: &[u8]) -> Result<Packet<'_>, DecodeEr
 pub(crate) mod testutil {
     pub use super::dns::tests::{query as dns_query, response as dns_response};
     pub use super::ip::tests::{v4, v6};
-    pub use super::tcp::tests::tcp;
-    pub use super::tls::tests::client_hello;
+    pub use super::tcp::tests::{tcp, tcp_seq};
+    pub use super::tls::tests::{client_hello, client_hello_padded};
     pub use super::udp::tests::udp;
 
     pub fn eth(ethertype: u16, l3: &[u8]) -> Vec<u8> {
