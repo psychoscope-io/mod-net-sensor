@@ -98,8 +98,10 @@ pub fn parse_client_hello(payload: &[u8]) -> Option<ClientHello> {
                     let n = usize::from(b.u8()?);
                     let list = b.take(n)?;
                     let best = list
-                        .chunks_exact(2)
-                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| u16::from_be_bytes(*c))
                         .filter(|v| !is_grease(*v))
                         .max()?;
                     version = version_name(best);
