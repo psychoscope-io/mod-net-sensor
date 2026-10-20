@@ -16,7 +16,11 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 CORE="$HERE/../psychoscope-core"
 TMP="$(mktemp -d)"
 DPID=""
-cleanup() { [ -n "$DPID" ] && kill -KILL "$DPID" 2>/dev/null || true; pkill -KILL -f "$TMP" 2>/dev/null || true; rm -rf "$TMP"; }
+cleanup() {
+  if [ -n "$DPID" ]; then kill -KILL "$DPID" 2>/dev/null || true; fi
+  pkill -KILL -f "$TMP" 2>/dev/null || true
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 fail() { echo "FALHOU: $*" >&2; cat "$TMP/daemon.log" >&2 || true; exit 1; }
 

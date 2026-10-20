@@ -8,5 +8,5 @@ remote_ref="origin/$(git rev-parse --abbrev-ref HEAD)"
 if git rev-parse -q --verify "$remote_ref" >/dev/null; then
   "$dir/check-commits.sh" "$remote_ref..HEAD"
 fi
-[ -f Makefile ] && grep -q '^check:' Makefile || exit 0
+if [ ! -f Makefile ] || ! grep -q '^check:' Makefile; then exit 0; fi
 exec make -s check

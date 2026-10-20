@@ -10,7 +10,10 @@ set -euo pipefail
 TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
 MAX_HEADER=100
 
-[ $# -eq 1 ] && [ -f "$1" ] || { echo "uso: $0 <arquivo-da-mensagem>" >&2; exit 2; }
+if [ $# -ne 1 ] || [ ! -f "$1" ]; then
+  echo "uso: $0 <arquivo-da-mensagem>" >&2
+  exit 2
+fi
 msg="$(grep -v '^#' "$1" || true)"
 header="$(printf '%s\n' "$msg" | head -n1)"
 

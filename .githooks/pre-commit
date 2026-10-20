@@ -2,5 +2,5 @@
 # Hook pre-commit: formatação e lint rápidos (alvo `precommit` do Makefile do repositório).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-[ -f Makefile ] && grep -q '^precommit:' Makefile || exit 0
+if [ ! -f Makefile ] || ! grep -q '^precommit:' Makefile; then exit 0; fi
 exec make -s precommit
