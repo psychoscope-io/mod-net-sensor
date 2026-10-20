@@ -67,24 +67,31 @@ pub fn parse_ipv6(buf: &[u8]) -> Result<IpHeader<'_>, DecodeError> {
         return Err(DecodeError::Malformed);
     }
     let payload_len = usize::from(r.u16().ok_or(DecodeError::Truncated)?);
-    let mut next = r.u8().ok_or(DecodeError::Truncated)?;
+    let next = r.u8().ok_or(DecodeError::Truncated)?;
     r.skip(1).ok_or(DecodeError::Truncated)?; // hop limit
-    let src: [u8; 16] = r
-        .take(16)
-        .ok_or(DecodeError::Truncated)?
-        .try_into()
-        .unwrap();
-    let dst: [u8; 16] = r
-        .take(16)
-        .ok_or(DecodeError::Truncated)?
-        .try_into()
-        .unwrap();
+    let src = take_addr(&mut r)?;
+    let dst = take_addr(&mut r)?;
 
     let body = r.rest();
-    let body = &body[..payload_len.min(body.len())];
-    let mut br = Reader::new(body);
-    let mut non_first_fragment = false;
+    let mut br = Reader::new(&body[..payload_len.min(body.len())]);
+    let (proto, non_first_fragment) = skip_extension_headers(&mut br, next)?;
+    Ok(IpHeader {
+        src: IpAddr::V6(Ipv6Addr::from(src)),
+        dst: IpAddr::V6(Ipv6Addr::from(dst)),
+        proto,
+        payload: if non_first_fragment { &[] } else { br.rest() },
+        non_first_fragment,
+    })
+}
 
+fn take_addr(r: &mut Reader<'_>) -> Result<[u8; 16], DecodeError> {
+    let bytes = r.take(16).ok_or(DecodeError::Truncated)?;
+    Ok(<[u8; 16]>::try_from(bytes).expect("take(16) devolve 16 bytes"))
+}
+
+/// Pula os cabecalhos de extensao conhecidos (ate MAX_EXT_HEADERS) e devolve o protocolo
+/// final e se este e um fragmento nao inicial (sem cabecalho L4).
+fn skip_extension_headers(br: &mut Reader<'_>, mut next: u8) -> Result<(u8, bool), DecodeError> {
     for _ in 0..MAX_EXT_HEADERS {
         match next {
             EXT_HOP_BY_HOP | EXT_ROUTING | EXT_DEST_OPTS | EXT_AUTH => {
@@ -105,21 +112,13 @@ pub fn parse_ipv6(buf: &[u8]) -> Result<IpHeader<'_>, DecodeError> {
                 br.skip(4).ok_or(DecodeError::Truncated)?; // identificacao
                 next = nh;
                 if off >> 3 != 0 {
-                    non_first_fragment = true;
-                    break;
+                    return Ok((next, true));
                 }
             }
             _ => break,
         }
     }
-
-    Ok(IpHeader {
-        src: IpAddr::V6(Ipv6Addr::from(src)),
-        dst: IpAddr::V6(Ipv6Addr::from(dst)),
-        proto: next,
-        payload: if non_first_fragment { &[] } else { br.rest() },
-        non_first_fragment,
-    })
+    Ok((next, false))
 }
 
 #[cfg(test)]

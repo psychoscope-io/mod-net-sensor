@@ -37,16 +37,7 @@ fn valid_hostname(h: &[u8]) -> bool {
 
 /// Devolve `Some` somente se `payload` comeca com um registro de handshake contendo um ClientHello.
 pub fn parse_client_hello(payload: &[u8]) -> Option<ClientHello> {
-    let mut r = Reader::new(payload);
-    if r.u8()? != CONTENT_HANDSHAKE || r.u8()? != 3 {
-        return None;
-    }
-    let _record_minor = r.u8()?;
-    let record_len = usize::from(r.u16()?);
-    // O registro pode ter sido truncado pelo snaplen: limita ao que foi capturado.
-    let rest = r.rest();
-    let mut h = Reader::new(&rest[..record_len.min(rest.len())]);
-
+    let mut h = handshake_reader(payload)?;
     if h.u8()? != HS_CLIENT_HELLO {
         return None;
     }
@@ -55,64 +46,93 @@ pub fn parse_client_hello(payload: &[u8]) -> Option<ClientHello> {
     if legacy >> 8 != 3 {
         return None;
     }
-    let mut version = version_name(legacy);
+    skip_fixed_fields(&mut h)?;
+
+    let mut out = ClientHello {
+        sni: None,
+        version: version_name(legacy),
+    };
+    let Some(ext_total) = h.u16() else {
+        return Some(out);
+    };
+    let ext_buf = h.rest();
+    let mut e = Reader::new(&ext_buf[..usize::from(ext_total).min(ext_buf.len())]);
+    parse_extensions(&mut e, &mut out);
+    Some(out)
+}
+
+/// Leitor posicionado no inicio do handshake, depois do cabecalho do registro TLS.
+/// O registro pode ter sido truncado pelo snaplen: limita ao que foi capturado.
+fn handshake_reader(payload: &[u8]) -> Option<Reader<'_>> {
+    let mut r = Reader::new(payload);
+    if r.u8()? != CONTENT_HANDSHAKE || r.u8()? != 3 {
+        return None;
+    }
+    let _record_minor = r.u8()?;
+    let record_len = usize::from(r.u16()?);
+    let rest = r.rest();
+    Some(Reader::new(&rest[..record_len.min(rest.len())]))
+}
+
+/// Pula random, session id, cipher suites e metodos de compressao.
+fn skip_fixed_fields(h: &mut Reader<'_>) -> Option<()> {
     h.skip(32)?; // random
     let sid = usize::from(h.u8()?);
     h.skip(sid)?;
     let cs = usize::from(h.u16()?);
     h.skip(cs)?;
     let comp = usize::from(h.u8()?);
-    h.skip(comp)?;
+    h.skip(comp)
+}
 
-    let mut out = ClientHello { sni: None, version };
-    let Some(ext_total) = h.u16() else {
-        return Some(out);
-    };
-    let ext_buf = h.rest();
-    let mut e = Reader::new(&ext_buf[..usize::from(ext_total).min(ext_buf.len())]);
-
-    // Extensoes: melhor esforco ate o fim dos dados capturados.
+/// Extensoes: melhor esforco ate o fim dos dados capturados.
+fn parse_extensions(e: &mut Reader<'_>, out: &mut ClientHello) {
     while let (Some(t), Some(l)) = (e.u16(), e.u16()) {
         let Some(body) = e.take(usize::from(l)) else {
             break;
         };
-        let mut b = Reader::new(body);
         match t {
             EXT_SERVER_NAME => {
-                let _ = (|| -> Option<()> {
-                    b.u16()?; // tamanho da lista
-                    while let (Some(nt), Some(nl)) = (b.u8(), b.u16()) {
-                        let name = b.take(usize::from(nl))?;
-                        if nt == 0 {
-                            if valid_hostname(name) {
-                                out.sni = Some(String::from_utf8_lossy(name).to_ascii_lowercase());
-                            }
-                            return Some(());
-                        }
-                    }
-                    Some(())
-                })();
+                if let Some(name) = sni_from_extension(body) {
+                    out.sni = Some(name);
+                }
             }
             EXT_SUPPORTED_VERSIONS => {
-                let _ = (|| -> Option<()> {
-                    let n = usize::from(b.u8()?);
-                    let list = b.take(n)?;
-                    let best = list
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|c| u16::from_be_bytes(*c))
-                        .filter(|v| !is_grease(*v))
-                        .max()?;
-                    version = version_name(best);
-                    Some(())
-                })();
+                if let Some(v) = highest_version(body) {
+                    out.version = v;
+                }
             }
             _ => {}
         }
     }
-    out.version = version;
-    Some(out)
+}
+
+/// Primeiro `host_name` da extensao server_name, se for um hostname valido.
+fn sni_from_extension(body: &[u8]) -> Option<String> {
+    let mut b = Reader::new(body);
+    b.u16()?; // tamanho da lista
+    while let (Some(name_type), Some(len)) = (b.u8(), b.u16()) {
+        let name = b.take(usize::from(len))?;
+        if name_type == 0 {
+            return valid_hostname(name)
+                .then(|| String::from_utf8_lossy(name).to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+/// Maior versao ofertada em supported_versions, ignorando valores GREASE.
+fn highest_version(body: &[u8]) -> Option<&'static str> {
+    let mut b = Reader::new(body);
+    let n = usize::from(b.u8()?);
+    let list = b.take(n)?;
+    list.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
+        .filter(|v| !is_grease(*v))
+        .max()
+        .map(version_name)
 }
 
 #[cfg(test)]

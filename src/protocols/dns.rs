@@ -72,70 +72,100 @@ fn read_name(msg: &[u8], start: usize) -> Option<(String, usize)> {
 }
 
 pub fn parse_dns(msg: &[u8]) -> Result<DnsInfo, DecodeError> {
-    let mut r = Reader::new(msg);
-    r.skip(2).ok_or(DecodeError::Truncated)?; // id
-    let flags = r.u16().ok_or(DecodeError::Truncated)?;
-    let qd = r.u16().ok_or(DecodeError::Truncated)?;
-    let an = r.u16().ok_or(DecodeError::Truncated)?;
-    r.skip(4).ok_or(DecodeError::Truncated)?; // ns + ar
-    if qd == 0 || qd > MAX_QUESTIONS {
-        return Err(DecodeError::Malformed);
-    }
-    let is_response = flags & 0x8000 != 0;
-    let rcode = (flags & 0x000f) as u8;
-
-    let mut pos = 12;
-    let mut domain = String::new();
-    let mut qtype = 0;
-    for i in 0..qd {
-        let (name, after) = read_name(msg, pos).ok_or(DecodeError::Malformed)?;
-        let mut q = Reader::new(msg.get(after..).ok_or(DecodeError::Truncated)?);
-        let t = q.u16().ok_or(DecodeError::Truncated)?;
-        q.skip(2).ok_or(DecodeError::Truncated)?; // classe
-        pos = after + 4;
-        if i == 0 {
-            domain = name;
-            qtype = t;
-        }
-    }
-
+    let header = parse_header(msg)?;
+    let (domain, qtype, pos) = parse_questions(msg, header.questions)?;
     // Respostas: melhor esforco; truncamento por snaplen devolve o que ja foi lido.
-    let mut answers = Vec::new();
-    if is_response {
-        for _ in 0..an.min(MAX_ANSWERS) {
-            let Some((_, after)) = read_name(msg, pos) else {
-                break;
-            };
-            let mut a = Reader::new(msg.get(after..).unwrap_or(&[]));
-            let (Some(t), Some(_class), Some(_ttl), Some(rdlen)) =
-                (a.u16(), a.u16(), a.u32(), a.u16())
-            else {
-                break;
-            };
-            let Some(rdata) = a.take(usize::from(rdlen)) else {
-                break;
-            };
-            pos = after + 10 + usize::from(rdlen);
-            match (t, rdata.len()) {
-                (1, 4) => answers.push(IpAddr::V4(Ipv4Addr::new(
-                    rdata[0], rdata[1], rdata[2], rdata[3],
-                ))),
-                (28, 16) => {
-                    let o: [u8; 16] = rdata.try_into().unwrap();
-                    answers.push(IpAddr::V6(Ipv6Addr::from(o)));
-                }
-                _ => {}
-            }
-        }
-    }
-
+    let answers = if header.is_response {
+        parse_answers(msg, pos, header.answers)
+    } else {
+        Vec::new()
+    };
     Ok(DnsInfo {
         domain,
         qtype,
         answers,
-        rcode,
-        is_response,
+        rcode: header.rcode,
+        is_response: header.is_response,
     })
+}
+
+struct Header {
+    is_response: bool,
+    rcode: u8,
+    questions: u16,
+    answers: u16,
+}
+
+/// Cabecalho de 12 bytes: exige 1 a MAX_QUESTIONS perguntas.
+fn parse_header(msg: &[u8]) -> Result<Header, DecodeError> {
+    let mut r = Reader::new(msg);
+    r.skip(2).ok_or(DecodeError::Truncated)?; // id
+    let flags = r.u16().ok_or(DecodeError::Truncated)?;
+    let questions = r.u16().ok_or(DecodeError::Truncated)?;
+    let answers = r.u16().ok_or(DecodeError::Truncated)?;
+    r.skip(4).ok_or(DecodeError::Truncated)?; // ns + ar
+    if questions == 0 || questions > MAX_QUESTIONS {
+        return Err(DecodeError::Malformed);
+    }
+    Ok(Header {
+        is_response: flags & 0x8000 != 0,
+        rcode: (flags & 0x000f) as u8,
+        questions,
+        answers,
+    })
+}
+
+/// Percorre as perguntas; devolve nome e tipo da primeira e a posicao logo depois da ultima.
+fn parse_questions(msg: &[u8], count: u16) -> Result<(String, u16, usize), DecodeError> {
+    let mut pos = 12;
+    let mut first = (String::new(), 0);
+    for i in 0..count {
+        let (name, after) = read_name(msg, pos).ok_or(DecodeError::Malformed)?;
+        let mut q = Reader::new(msg.get(after..).ok_or(DecodeError::Truncated)?);
+        let qtype = q.u16().ok_or(DecodeError::Truncated)?;
+        q.skip(2).ok_or(DecodeError::Truncated)?; // classe
+        pos = after + 4;
+        if i == 0 {
+            first = (name, qtype);
+        }
+    }
+    Ok((first.0, first.1, pos))
+}
+
+/// Enderecos A/AAAA das respostas, ate MAX_ANSWERS; para ao primeiro registro ilegivel.
+fn parse_answers(msg: &[u8], mut pos: usize, count: u16) -> Vec<IpAddr> {
+    let mut answers = Vec::new();
+    for _ in 0..count.min(MAX_ANSWERS) {
+        let Some((_, after)) = read_name(msg, pos) else {
+            break;
+        };
+        let mut a = Reader::new(msg.get(after..).unwrap_or(&[]));
+        let (Some(t), Some(_class), Some(_ttl), Some(rdlen)) = (a.u16(), a.u16(), a.u32(), a.u16())
+        else {
+            break;
+        };
+        let Some(rdata) = a.take(usize::from(rdlen)) else {
+            break;
+        };
+        pos = after + 10 + usize::from(rdlen);
+        if let Some(ip) = address_from_rdata(t, rdata) {
+            answers.push(ip);
+        }
+    }
+    answers
+}
+
+/// A (tipo 1, 4 bytes) ou AAAA (tipo 28, 16 bytes); outros tipos nao interessam.
+fn address_from_rdata(rtype: u16, rdata: &[u8]) -> Option<IpAddr> {
+    match (rtype, rdata.len()) {
+        (1, 4) => Some(IpAddr::V4(Ipv4Addr::new(
+            rdata[0], rdata[1], rdata[2], rdata[3],
+        ))),
+        (28, 16) => <[u8; 16]>::try_from(rdata)
+            .ok()
+            .map(|o| IpAddr::V6(Ipv6Addr::from(o))),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
