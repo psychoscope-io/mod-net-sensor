@@ -76,7 +76,7 @@ cargo +nightly fuzz run parse_dns   # interativo; crashes em fuzz/artifacts/<alv
 
 Precisa de `libpcap-dev` (ou `LIBPCAP_LIBDIR`, como acima). No CI, `.github/workflows/fuzz.yml` roda semanalmente (cron) e sob demanda (`workflow_dispatch`), 5 min por alvo, e publica os artefatos de crash.
 
-Depende de `psychoscope-proto` via `git` + `tag = "v0.1.0"` (`Cargo.lock` fixa o commit). Antes da publicação (ou offline): `source ../psychoscope-proto/scripts/local-deps.sh` faz o Cargo buscar a tag no checkout local; os scripts `e2e.sh`/`live_smoke.sh` já fazem isso quando o repositório irmão existe. Para iterar no contrato sem criar tags, use `[patch]` em `.cargo/config.toml` (ignorado pelo git).
+Depende de `psychoscope-proto` via `git` + `tag = "v0.2.0"` (`Cargo.lock` fixa o commit). Antes da publicação (ou offline): `source ../psychoscope-proto/scripts/local-deps.sh` faz o Cargo buscar a tag no checkout local; os scripts `e2e.sh`/`live_smoke.sh` já fazem isso quando o repositório irmão existe. Para iterar no contrato sem criar tags, use `[patch]` em `.cargo/config.toml` (ignorado pelo git).
 Se `libpcap-dev` não estiver instalado, mas a lib de runtime sim, crie um symlink `libpcap.so` num diretório qualquer e exporte `LIBPCAP_LIBDIR=<dir>` para linkar.
 
 ## Licença
