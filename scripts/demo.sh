@@ -36,7 +36,10 @@ CORE="$(find_core)"
 TMP="$(mktemp -d)"
 DPID=""
 cleanup() {
-  if [ -n "$DPID" ]; then kill "$DPID" 2>/dev/null && wait "$DPID" 2>/dev/null || true; fi
+  if [ -n "$DPID" ]; then
+    kill "$DPID" 2>/dev/null || true
+    wait "$DPID" 2>/dev/null || true
+  fi
   rm -rf "$TMP"
 }
 trap cleanup EXIT
