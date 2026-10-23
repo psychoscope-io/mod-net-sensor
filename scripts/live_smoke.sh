@@ -5,7 +5,7 @@
 # Requer ../psychoscope-core, unshare e ip.
 set -euo pipefail
 if [ "${1:-}" != "--inner" ]; then
-  exec timeout -s KILL 120 unshare -Urn bash "$0" --inner
+  exec timeout -s KILL 300 unshare -Urn bash "$0" --inner
 fi
 
 export PATH="$HOME/.local/go/bin:$PATH"
@@ -32,7 +32,7 @@ cat > "$TMP/cfg.json" <<JSON
 { "status_interval": "1s",
   "modules": [{ "id": "mod-net-sensor", "path": "$HERE/target/debug/mod-net-sensor",
                 "args": ["-i", "lo"], "connect_timeout": "10s", "stop_grace": "5s" }],
-  "storage": { "path": "$TMP/state/alerts.db" } }
+  "storage": { "path": "$TMP/state/alerts.db" }, "overrides_path": "$TMP/state/overrides.json" }
 JSON
 CLI="$TMP/psychoscope-cli --ctl-socket $TMP/run/ctl.sock"
 "$TMP/psychoscope" --config "$TMP/cfg.json" --socket "$TMP/run/core.sock" --ctl-socket "$TMP/run/ctl.sock" --log-level debug 2> "$TMP/daemon.log" &
@@ -74,6 +74,24 @@ $CLI cmd mod-net-sensor reconfigure bpf="udp port 53" | grep -q ok || fail "reco
 echo "ok: RECONFIGURAR (BPF) aplicado ao vivo"
 $CLI cmd mod-net-sensor reconfigure bpf="isto nao e bpf ((" 2> "$TMP/nack.txt" && fail "BPF invalido deveria ser NACK"
 echo "ok: BPF invalido recusado (NACK): $(cat "$TMP/nack.txt")"
+
+# Configuracao ao vivo: neste namespace o usuario e root, entao a escrita e permitida.
+$CLI config set detection.scan.vertical_ports=40 | grep -q "detection.scan.vertical_ports: 15 -> 40" || fail "config set"
+$CLI config detection.scan.vertical_ports | grep -q "ajuste" || fail "o campo deve aparecer com origem ajuste"
+[ "$(stat -c %a "$TMP/state/overrides.json")" = 600 ] || fail "o arquivo de ajustes deve ter modo 0600"
+grep -q "configuracao alterada" "$TMP/daemon.log" || fail "a mudanca deve ir para o log de auditoria"
+grep -q "motor reconfigurado" "$TMP/daemon.log" || fail "o motor deve ter sido reconfigurado ao vivo"
+if $CLI config set detection.scan.window=10m 2> "$TMP/cfgbad.txt"; then fail "janela maior que detection.window deveria ser recusada"; fi
+grep -q "detection.window" "$TMP/cfgbad.txt" || fail "erro de validacao: $(cat "$TMP/cfgbad.txt")"
+$CLI config reset detection.scan.vertical_ports | grep -q "detection.scan.vertical_ports: 40 -> 15" || fail "config reset"
+[ ! -e "$TMP/state/overrides.json" ] || fail "sem ajustes o arquivo e removido"
+echo "ok: configuracao ao vivo (ajuste, auditoria, motor reconfigurado, validacao e restauracao)"
+
+# Tela de configuracoes da TUI num pty real (como root do namespace): edita, grava, restaura e sai.
+python3 "$CORE/scripts/tui_config_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" "$TMP/state/overrides.json" > "$TMP/tui_config.txt" 2>&1 \
+  || { cat "$TMP/tui_config.txt" >&2; fail "tela de configuracoes da TUI"; }
+tail -1 "$TMP/tui_config.txt" | grep -q "TUI CONFIG OK" || fail "tela de configuracoes da TUI: $(tail -3 "$TMP/tui_config.txt")"
+echo "ok: tela de configuracoes da TUI num pty real (edicao, rascunho, gravacao, restauracao e saida)"
 
 START=$(date +%s)
 kill -TERM "$DPID"; wait "$DPID"; RC=$?; DPID=""

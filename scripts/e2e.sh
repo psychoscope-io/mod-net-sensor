@@ -35,7 +35,8 @@ cat > "$TMP/cfg.json" <<JSON
     "connect_timeout": "10s",
     "stop_grace": "5s"
   }],
-  "storage": { "path": "$TMP/state/alerts.db" }
+  "storage": { "path": "$TMP/state/alerts.db" },
+  "overrides_path": "$TMP/state/overrides.json"
 }
 JSON
 CLI="$TMP/psychoscope-cli --ctl-socket $TMP/run/ctl.sock"
@@ -81,6 +82,18 @@ grep -q "^psychoscope_module_up{module=mod-net-sensor}  *1$" "$TMP/metrics.txt" 
 grep -q "^psychoscope_engine_events_processed_total  *$EXPECTED$" "$TMP/metrics.txt" || fail "eventos processados no motor != $EXPECTED: $(grep events_processed "$TMP/metrics.txt")"
 echo "ok: metricas ($EXPECTED eventos processados, 10 alertas)"
 
+# Configuracao pelo canal de controle: a leitura vale para o usuario do daemon; a escrita e so do
+# root (UID do kernel), e este script roda sem privilegios. (O live_smoke.sh exercita a escrita.)
+if [ "$(id -u)" != 0 ]; then
+  $CLI config > "$TMP/config.txt" || fail "config (leitura)"
+  grep -q "^detection.scan.vertical_ports " "$TMP/config.txt" || fail "config: campo ausente da listagem"
+  grep -q "somente leitura" "$TMP/config.txt" || fail "config: usuario comum deve ver o aviso de somente leitura"
+  if $CLI config set detection.scan.vertical_ports=30 2> "$TMP/cfgdeny.txt"; then fail "config set sem root deveria ser recusado"; fi
+  grep -q "somente o root" "$TMP/cfgdeny.txt" || fail "mensagem de recusa: $(cat "$TMP/cfgdeny.txt")"
+  [ ! -e "$TMP/state/overrides.json" ] || fail "nada pode ser gravado quando a escrita e recusada"
+  echo "ok: configuracao: leitura permitida e escrita recusada sem root"
+fi
+
 # TUI num pseudo-terminal real: deve mostrar o modulo conectado e os alertas.
 python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE mod-net-sensor CONECTADO "Alertas (10)" net.scan.syn net.dns.tunnel "ev/s" || fail "TUI"
 grep -q "telemetria recebida" "$TMP/daemon.log" || fail "core nao registrou telemetria"
@@ -110,7 +123,7 @@ echo "ok: shutdown gracioso do daemon"
 
 # Persistencia: um daemon NOVO, sem modulos, ainda conhece os 10 alertas (SQLite).
 cat > "$TMP/cfg2.json" <<JSON
-{ "status_interval": "1s", "storage": { "path": "$TMP/state/alerts.db" } }
+{ "status_interval": "1s", "storage": { "path": "$TMP/state/alerts.db" }, "overrides_path": "$TMP/state/overrides.json" }
 JSON
 [ "$(stat -c %a "$TMP/state/alerts.db")" = 600 ] || fail "banco de alertas deve ter modo 0600"
 "$TMP/psychoscope" --config "$TMP/cfg2.json" --socket "$TMP/run/core.sock" --ctl-socket "$TMP/run/ctl.sock" --log-level debug 2> "$TMP/daemon2.log" &
