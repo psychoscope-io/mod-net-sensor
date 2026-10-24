@@ -468,3 +468,124 @@ async fn unexpected_first_reply_is_not_accepted() {
     stx.send(true).unwrap();
     let _ = timeout(Duration::from_secs(2), task).await;
 }
+
+fn plain_client() -> Client<MockCtl> {
+    Client::new(cfg(&sock_path("batch")), Arc::new(MockCtl::default()))
+}
+
+/// Le todos os frames de `bytes` e devolve o ip_destino de cada evento de telemetria.
+async fn destinations(bytes: Vec<u8>) -> Vec<String> {
+    let mut r = std::io::Cursor::new(bytes);
+    let mut out = Vec::new();
+    while let Some(m) = read_message(&mut r, 0).await.unwrap() {
+        let Some(Payload::Telemetria(t)) = m.payload else {
+            panic!("so telemetria: {m:?}")
+        };
+        let Some(evento_telemetria::Dado::Rede(e)) = t.dado else {
+            panic!()
+        };
+        out.push(e.ip_destino);
+    }
+    out
+}
+
+#[tokio::test]
+async fn queued_events_go_out_in_batches_in_order() {
+    let client = plain_client();
+    let (tx, mut rx) = mpsc::channel(256);
+    for i in 1..=100 {
+        tx.send(ev(&format!("d{i}"))).await.unwrap();
+    }
+    let mut scratch = Vec::new();
+
+    // 1o lote: o evento recebido + o que ja espera no canal, ate o teto
+    let mut out = Vec::new();
+    client
+        .send_events(&mut out, &mut scratch, ev("d0"), &mut rx)
+        .await
+        .unwrap();
+    let first = destinations(out).await;
+    assert_eq!(first.len() as u64, MAX_BATCH_EVENTS);
+    assert_eq!((first[0].as_str(), first[63].as_str()), ("d0", "d63"));
+
+    // 2o lote: o resto, sem esperar por mais (nao ha mais nada na fila)
+    let head = rx.try_recv().unwrap();
+    let mut out = Vec::new();
+    client
+        .send_events(&mut out, &mut scratch, head, &mut rx)
+        .await
+        .unwrap();
+    let second = destinations(out).await;
+    assert_eq!(
+        (second.len(), second[0].as_str(), second[36].as_str()),
+        (37, "d64", "d100")
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "nada ficou para tras: 1 + 100 eventos"
+    );
+    assert_eq!(client.counters.events_sent.load(Relaxed), 101);
+    assert_eq!(client.counters.events_dropped.load(Relaxed), 0);
+}
+
+/// Escritor que sempre falha, como um socket que o Core fechou.
+struct Broken;
+impl AsyncWrite for Broken {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_write_counts_the_whole_batch_as_dropped() {
+    let client = plain_client();
+    let (tx, mut rx) = mpsc::channel(16);
+    for i in 1..=4 {
+        tx.send(ev(&format!("d{i}"))).await.unwrap();
+    }
+    let r = client
+        .send_events(&mut Broken, &mut Vec::new(), ev("d0"), &mut rx)
+        .await;
+    assert!(r.is_err());
+    assert_eq!(client.counters.events_dropped.load(Relaxed), 5);
+    assert_eq!(client.counters.events_sent.load(Relaxed), 0);
+}
+
+#[tokio::test]
+async fn a_burst_through_the_real_session_arrives_complete_and_in_order() {
+    let h = start("burst", false);
+    let (mut core, _) = handshake(&h.listener).await;
+    for i in 0..200 {
+        h.events.send(ev(&format!("b{i}"))).await.unwrap();
+    }
+    let mut got = Vec::new();
+    while got.len() < 200 {
+        if let Some(Payload::Telemetria(t)) = recv_msg(&mut core).await.payload {
+            let Some(evento_telemetria::Dado::Rede(e)) = t.dado else {
+                panic!()
+            };
+            got.push(e.ip_destino);
+        }
+    }
+    let want: Vec<String> = (0..200).map(|i| format!("b{i}")).collect();
+    assert_eq!(got, want);
+    assert_eq!(h.counters.events_sent.load(Relaxed), 200);
+    h.shutdown.send(true).unwrap();
+    let _ = h.task.await;
+}

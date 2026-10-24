@@ -14,13 +14,13 @@ use psychoscope_proto::v1::{
     ComandoControle, EventoFluxoRede, EventoTelemetria, HelloModulo, MensagemIpc, RespostaComando,
     StatusModulo, comando_controle::TipoAcao, evento_telemetria, mensagem_ipc::Payload,
 };
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, interval, sleep, timeout};
 
-use super::framer::{FrameError, read_message, write_message};
+use super::framer::{FrameError, append_frame, read_message, write_message};
 use crate::event::to_timestamp;
 use crate::procstats::{CpuMeter, rss_mb};
 
@@ -33,6 +33,9 @@ mod controller;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONFIGURE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Teto de eventos e de bytes por escrita no socket (o que ja esta na fila; nao espera por mais).
+const MAX_BATCH_EVENTS: u64 = 64;
+const MAX_BATCH_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -237,6 +240,7 @@ impl<C: Controller> Client<C> {
         let mut tick = interval(status_every);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut cpu = CpuMeter::new();
+        let mut scratch = Vec::new(); // buffer dos lotes de eventos, reaproveitado
 
         loop {
             tokio::select! {
@@ -248,7 +252,7 @@ impl<C: Controller> Client<C> {
                     if let Some(exit) = self.handle(m, &mut wr).await? { return Ok(exit); }
                 }
                 ev = events.recv(), if *events_open => match ev {
-                    Some(ev) => self.send_event(&mut wr, ev).await?,
+                    Some(ev) => self.send_events(&mut wr, &mut scratch, ev, events).await?,
                     None => {
                         *events_open = false;
                         if self.exit_when_drained {
@@ -266,23 +270,47 @@ impl<C: Controller> Client<C> {
         }
     }
 
-    /// Envia um evento de rede como telemetria e atualiza os contadores de enviados/descartados.
-    async fn send_event<W: AsyncWrite + Unpin>(
+    /// Envia `first` e os eventos que ja esperam no canal (ate `MAX_BATCH_EVENTS` ou
+    /// `MAX_BATCH_BYTES`) como telemetria, serializados juntos em `scratch` e escritos de uma
+    /// vez: uma escrita no socket por lote em vez de uma por evento. Nao espera por mais
+    /// eventos, entao nao acrescenta latencia. Atualiza os contadores de enviados/descartados.
+    async fn send_events<W: AsyncWrite + Unpin>(
         &self,
         w: &mut W,
-        ev: EventoFluxoRede,
+        scratch: &mut Vec<u8>,
+        first: EventoFluxoRede,
+        events: &mut mpsc::Receiver<EventoFluxoRede>,
     ) -> Result<(), SessionError> {
-        let m = self.envelope(Payload::Telemetria(EventoTelemetria {
-            id_modulo: self.cfg.module_id.clone(),
-            dado: Some(evento_telemetria::Dado::Rede(ev)),
-        }));
-        let result = self.send(w, &m).await;
+        scratch.clear();
+        let mut queued = 0u64;
+        let mut next = Some(first);
+        while let Some(ev) = next.take() {
+            let m = self.envelope(Payload::Telemetria(EventoTelemetria {
+                id_modulo: self.cfg.module_id.clone(),
+                dado: Some(evento_telemetria::Dado::Rede(ev)),
+            }));
+            match append_frame(scratch, &m) {
+                Ok(()) => queued += 1,
+                // evento que nao cabe num frame: so ele se perde, o lote segue
+                Err(_) => {
+                    self.counters.events_dropped.fetch_add(1, Relaxed);
+                }
+            }
+            if queued >= MAX_BATCH_EVENTS || scratch.len() >= MAX_BATCH_BYTES {
+                break;
+            }
+            next = events.try_recv().ok();
+        }
+        if queued == 0 {
+            return Ok(());
+        }
+        let result = self.write_all(w, scratch).await;
         let counter = if result.is_ok() {
             &self.counters.events_sent
         } else {
             &self.counters.events_dropped
         };
-        counter.fetch_add(1, Relaxed);
+        counter.fetch_add(queued, Relaxed);
         result
     }
 
@@ -315,6 +343,21 @@ impl<C: Controller> Client<C> {
         timeout(WRITE_TIMEOUT, write_message(w, m))
             .await
             .map_err(|_| SessionError::Timeout("escrita"))??;
+        Ok(())
+    }
+
+    /// Escreve frames ja serializados (`append_frame`) de uma vez, com o mesmo limite de tempo.
+    async fn write_all<W: AsyncWrite + Unpin>(
+        &self,
+        w: &mut W,
+        frames: &[u8],
+    ) -> Result<(), SessionError> {
+        timeout(WRITE_TIMEOUT, async {
+            w.write_all(frames).await?;
+            w.flush().await
+        })
+        .await
+        .map_err(|_| SessionError::Timeout("escrita"))??;
         Ok(())
     }
 
