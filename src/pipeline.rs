@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::capture::sniffer::{CaptureCounters, Captured, ReconfigRequest};
-use crate::event::{EmitPolicy, build_event_reassembling};
+use crate::event::{EmitPolicy, Fed, feed_event};
 use crate::ipc::client::{Controller, StatsSnapshot};
 use crate::protocols::{DecodeError, Transport, decode_frame};
 use crate::reassembly::Reassembler;
@@ -62,7 +62,7 @@ impl Decoder {
             self.counters.ip_fragments.fetch_add(1, Relaxed);
         }
         let truncated = p.data.len() < p.wire_len as usize;
-        let ev = build_event_reassembling(
+        let fed = feed_event(
             &mut self.reasm,
             &pkt,
             p.ts,
@@ -71,10 +71,14 @@ impl Decoder {
             self.policy,
         );
         self.publish_reassembly_discards();
-        if ev.is_none() {
-            self.counters.policy_filtered.fetch_add(1, Relaxed);
+        match fed {
+            Fed::Event(ev) => Some(ev),
+            Fed::Held => None, // o evento sai quando o ClientHello completar
+            Fed::Filtered => {
+                self.counters.policy_filtered.fetch_add(1, Relaxed);
+                None
+            }
         }
-        ev
     }
 
     /// Expira fluxos ociosos da remontagem; `now` e o relogio desde a epoca Unix.
@@ -91,6 +95,16 @@ impl Decoder {
                 .fetch_add(total - self.reasm_published, Relaxed);
             self.reasm_published = total;
         }
+    }
+}
+
+/// Espera o proximo tick de expiracao ociosa; sem ele (modo `lossless`), nunca acontece.
+async fn next_idle_tick(idle: &mut Option<tokio::time::Interval>) {
+    match idle {
+        Some(tick) => {
+            tick.tick().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -117,7 +131,8 @@ async fn deliver(
 
 /// Consome pacotes brutos, decodifica e emite eventos. Termina quando a captura fecha o canal.
 /// `lossless` (leitura de arquivo) espera espaco em vez de descartar. Ao vivo, a remontagem
-/// tambem expira fluxos ociosos pelo relogio do sistema, para liberar memoria sem trafego.
+/// tambem expira fluxos ociosos pelo relogio do sistema, para liberar memoria sem trafego, o
+/// que exige o driver de tempo do tokio (`enable_time`); em `lossless` nao se usa o relogio.
 pub async fn decode_loop(
     mut rx: mpsc::Receiver<Captured>,
     tx: mpsc::Sender<EventoFluxoRede>,
@@ -131,8 +146,11 @@ pub async fn decode_loop(
         policy,
         counters: counters.clone(),
     };
-    let mut idle = interval(IDLE_EXPIRE_EVERY);
-    idle.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut idle = (!lossless).then(|| {
+        let mut tick = interval(IDLE_EXPIRE_EVERY);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        tick
+    });
     loop {
         tokio::select! {
             biased;
@@ -143,7 +161,7 @@ pub async fn decode_loop(
                     break;
                 }
             }
-            _ = idle.tick(), if !lossless => {
+            _ = next_idle_tick(&mut idle) => {
                 let now = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap_or_default();
@@ -514,6 +532,47 @@ mod tests {
         .await;
         assert_eq!(evs.len(), 1);
         assert_eq!(c.reassembly_discarded.load(Relaxed), 0);
+        assert_eq!(
+            c.policy_filtered.load(Relaxed),
+            0,
+            "o fragmento retido nao e descarte da politica"
+        );
+    }
+
+    #[test]
+    fn feed_event_tells_held_fragments_from_filtered_packets() {
+        let h = client_hello_padded("quantum.example", 3000);
+        let mut reasm = Reassembler::new();
+        let first = seg_frame(1000, &h[..1400]);
+        let second = seg_frame(2400, &h[1400..]);
+        let udp_noise = eth_v4(17, &udp(1, 2, b"x"));
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let mut fed = |frame: &[u8], policy| {
+            let pkt = decode_frame(LinkType::Ethernet, frame).unwrap();
+            feed_event(&mut reasm, &pkt, at, frame.len() as u64, false, policy)
+        };
+        assert_eq!(fed(&first, EmitPolicy::Interesting), Fed::Held);
+        assert!(matches!(
+            fed(&second, EmitPolicy::Interesting),
+            Fed::Event(_)
+        ));
+        assert_eq!(fed(&udp_noise, EmitPolicy::Interesting), Fed::Filtered);
+        assert!(matches!(fed(&udp_noise, EmitPolicy::All), Fed::Event(_)));
+        // com a politica all o fragmento retido tambem vira evento (sem L7)
+        let other = seg_frame(5000, &h[..1400]);
+        assert!(matches!(fed(&other, EmitPolicy::All), Fed::Event(_)));
+    }
+
+    #[test]
+    fn lossless_decode_does_not_need_the_tokio_time_driver() {
+        // runtime sem enable_time: o laço de leitura de arquivo nao pode criar timers
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let frame = eth_v4(17, &udp(1, 53, &dns_query("a.com", 1)));
+        let (evs, c) = rt.block_on(run_counted(vec![cap(frame)], EmitPolicy::Interesting));
+        assert_eq!(evs.len(), 1);
+        assert_eq!(c.policy_filtered.load(Relaxed), 0);
     }
 
     #[tokio::test]

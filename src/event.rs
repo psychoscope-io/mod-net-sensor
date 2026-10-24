@@ -143,14 +143,28 @@ fn fill_icmp(ev: &mut EventoFluxoRede, icmp_type: u8, code: u8) -> bool {
     true
 }
 
-pub fn build_event_reassembling(
+/// O que a remontagem + a politica fizeram com um pacote.
+#[derive(Debug, PartialEq)]
+pub enum Fed {
+    /// Virou evento.
+    Event(EventoFluxoRede),
+    /// Fragmento de ClientHello retido: o evento sai quando o registro completar (ou o fluxo
+    /// e descartado e contado pela remontagem). Nao e descarte da politica.
+    Held,
+    /// A politica de emissao descartou o pacote.
+    Filtered,
+}
+
+/// Como `build_event`, mas passando antes os segmentos TCP pela remontagem, e dizendo se o
+/// pacote sem evento foi retido ou descartado pela politica.
+pub fn feed_event(
     reasm: &mut Reassembler,
     pkt: &Packet<'_>,
     ts: SystemTime,
     wire_len: u64,
     truncated: bool,
     policy: EmitPolicy,
-) -> Option<EventoFluxoRede> {
+) -> Fed {
     let Transport::Tcp {
         src_port,
         dst_port,
@@ -159,7 +173,7 @@ pub fn build_event_reassembling(
         payload,
     } = &pkt.transport
     else {
-        return build_event(pkt, ts, wire_len, policy);
+        return fed(build_event(pkt, ts, wire_len, policy), false);
     };
     let key = FlowKey {
         src_ip: pkt.src_ip,
@@ -178,10 +192,39 @@ pub fn build_event_reassembling(
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or(Duration::ZERO);
     match reasm.feed(now, key, seg) {
-        Outcome::Passthrough => build_event(pkt, ts, wire_len, policy),
+        Outcome::Passthrough => fed(build_event(pkt, ts, wire_len, policy), false),
         // fragmento retido: o evento sai quando o registro completar
-        Outcome::Pending => build_event(&with_payload(pkt, &[]), ts, wire_len, policy),
-        Outcome::Complete(record) => build_event(&with_payload(pkt, &record), ts, wire_len, policy),
+        Outcome::Pending => fed(
+            build_event(&with_payload(pkt, &[]), ts, wire_len, policy),
+            true,
+        ),
+        Outcome::Complete(record) => fed(
+            build_event(&with_payload(pkt, &record), ts, wire_len, policy),
+            false,
+        ),
+    }
+}
+
+fn fed(event: Option<EventoFluxoRede>, pending: bool) -> Fed {
+    match event {
+        Some(ev) => Fed::Event(ev),
+        None if pending => Fed::Held,
+        None => Fed::Filtered,
+    }
+}
+
+/// `feed_event` para quem so quer o evento, se houve.
+pub fn build_event_reassembling(
+    reasm: &mut Reassembler,
+    pkt: &Packet<'_>,
+    ts: SystemTime,
+    wire_len: u64,
+    truncated: bool,
+    policy: EmitPolicy,
+) -> Option<EventoFluxoRede> {
+    match feed_event(reasm, pkt, ts, wire_len, truncated, policy) {
+        Fed::Event(ev) => Some(ev),
+        Fed::Held | Fed::Filtered => None,
     }
 }
 
