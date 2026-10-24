@@ -7,21 +7,82 @@ pcap (thread dedicada, nao bloqueante) ──mpsc──▶ decode (parsers puros
 ```
 
 - **Source** (`src/capture/`): libpcap em thread própria; canal limitado — se o consumidor atrasa, o pacote é descartado e **contado** (nunca bloqueia nem cresce sem limite). Também lê `--pcap-file` (replay/testes, sem perdas).
-- **Decode** (`src/protocols/`): Ethernet (+VLAN), Linux SLL, IP puro, IPv4/IPv6 (extensões, fragmentos), TCP, UDP, ICMP/ICMPv6, DNS (compressão segura, A/AAAA, rcode) e TLS ClientHello (SNI, versão). Sem `unsafe`, toda leitura checada; entrada arbitrária nunca causa panic (testes proptest).
-- **Sink** (`src/ipc/`): `Hello` com PID real (o Core confere via `SO_PEERCRED`), telemetria `EventoFluxoRede`, `StatusModulo` periódico (heartbeat; inclui memória, CPU e descartes), comandos PAUSAR/RETOMAR/RECONFIGURAR (`bpf=`)/ENCERRAR com ACK/NACK e reconexão com backoff exponencial.
+- **Decode** (`src/protocols/`): Ethernet (+VLAN/QinQ), Linux cooked v1 e v2 (SLL, SLL2), loopback BSD (DLT_NULL/DLT_LOOP), IP puro, IPv4/IPv6 (extensões; fragmentos não iniciais são contados, não remontados), TCP, UDP, ICMP/ICMPv6, DNS (compressão segura, A/AAAA, rcode; nomes de até 253 caracteres) e TLS ClientHello (SNI, versão). Sem `unsafe`, toda leitura checada; entrada arbitrária nunca causa panic (testes proptest).
+- **Sink** (`src/ipc/`): `Hello` com PID real (o Core confere via `SO_PEERCRED`), telemetria `EventoFluxoRede`, `StatusModulo` periódico (heartbeat; inclui memória, CPU e o detalhe das perdas, veja "Perdas e contadores"), comandos PAUSAR/RETOMAR/RECONFIGURAR (`bpf=`)/ENCERRAR com ACK/NACK e reconexão com backoff exponencial.
 
 ## Uso
 
 ```
 mod-net-sensor -i eth0 [--bpf "udp port 53 or tcp port 443"] [--emit interesting|all]
 mod-net-sensor --pcap-file captura.pcap [--exit-on-eof]
+mod-net-sensor --list-interfaces                 # interfaces que dá para capturar
+mod-net-sensor --check -i eth0                   # confere o ambiente e diz o que corrigir
+mod-net-sensor --pcap-file captura.pcap --print  # eventos no terminal, sem o Core
 ```
 
 Sob o supervisor do Core, `PSYCHOSCOPE_SOCKET` e `PSYCHOSCOPE_MODULE_ID` são definidos automaticamente.
 
-`--emit interesting` (padrão) gera evento para DNS, TLS ClientHello, TCP com SYN/RST e ICMP — o suficiente para as regras de DNS e de varredura; `all` emite todo pacote IP.
+| Opção | Padrão | O que faz |
+|---|---|---|
+| `-i`, `--interface <nome>` | | Captura ao vivo (exige `CAP_NET_RAW` e `CAP_NET_ADMIN`, veja "Privilégios"). |
+| `--pcap-file <arquivo>` | | Lê um arquivo pcap/pcapng em vez de capturar (replay, testes), sem perdas. Exatamente uma fonte entre `-i` e `--pcap-file`. |
+| `--bpf <filtro>` | nenhum | Filtro BPF (por exemplo `"udp port 53 or tcp port 443"`); pode ser trocado ao vivo pelo Core (`RECONFIGURAR`). |
+| `--emit interesting\|all` | `interesting` | Quais pacotes viram evento (veja abaixo). |
+| `--snaplen <bytes>` | 2048 | Bytes capturados por pacote (128 a 65535). |
+| `--no-promisc` | desligado | Não usa o modo promíscuo. |
+| `--queue-size <n>` | 8192 | Tamanho dos canais internos (16 a 1 000 000); excedentes são descartados e contados. `queue-size × snaplen` não pode passar de 256 MiB. |
+| `--socket <caminho>` | `/var/run/psychoscope/core.sock` | Socket do Core (também `PSYCHOSCOPE_SOCKET`). |
+| `--module-id <nome>` | `mod-net-sensor` | Identificador deste módulo (também `PSYCHOSCOPE_MODULE_ID`). |
+| `--exit-on-eof` | desligado | Com `--pcap-file`: encerra depois de enviar tudo, em vez de ficar ocioso. |
+| `--list-interfaces` | | Lista as interfaces (estado, tipo e endereços; as ativas com IPv4 primeiro) e sai. Só pode ser usado sozinho. |
+| `--check` | | Confere fonte, filtro BPF, permissão de captura, fila e destino dos eventos, mostra **como corrigir** cada problema e sai com 1 se algo falhar (avisos não contam). Não captura nem envia nada. |
+| `--print[=text\|json]` | | Imprime cada evento no stdout em vez de enviá-lo ao Core, que não precisa estar no ar. `text`: uma linha por evento; `json`: um objeto por linha, com os nomes de campo do contrato. Com `--pcap-file`, implica `--exit-on-eof`. |
+| `-v`, `--verbose` | desligado | Uma linha de resumo a cada 10 s no stderr (pacotes/s, eventos/s, perdas). |
 
-Limitações conhecidas: DNS sobre TCP só considera a primeira mensagem do segmento; ClientHello só é remontado quando cabe num único registro TLS; sem QUIC/DoH.
+`--emit interesting` (padrão) gera evento para DNS, TLS ClientHello, TCP com SYN/RST e ICMP — o suficiente para as regras de DNS e de varredura; `all` emite todo pacote IP, inclusive os de protocolo de camada 4 desconhecido (`PROTO_DESCONHECIDO`).
+
+### Diagnóstico e erros
+
+`--check` roda as mesmas aberturas que a partida (interface, permissão, arquivo, filtro BPF) e explica cada falha:
+
+```
+[ok]      fonte: interface wlp2s0 (192.168.0.8, ...)
+[falha]   captura: pcap: libpcap error: socket: Operation not permitted
+         como corrigir: a captura exige CAP_NET_RAW e CAP_NET_ADMIN: uma vez, como administrador, rode `sudo setcap ...`
+[aviso]   destino: sem conexao com o Core em /var/run/psychoscope/core.sock: ...
+```
+
+Os mesmos textos aparecem quando a partida falha: interface inexistente (com a lista das que existem), interface desativada, arquivo ausente ou que não é pcap, filtro BPF inválido, permissão e Core fora do ar.
+
+### Ver os eventos sem o Core
+
+```
+mod-net-sensor --pcap-file captura.pcap --print
+2023-11-14T22:13:20.000Z UDP 10.0.0.1:51000 -> 10.0.0.2:53 71B DNS consulta example.com tipo 1
+2023-11-14T22:13:20.500Z TCP 10.0.0.1:52000 -> 10.0.0.2:443 571B [PSH,ACK] TLS ClientHello SNI secure.example.com versao TLS1.3
+mod-net-sensor --pcap-file captura.pcap --print=json | jq .dns
+```
+
+Domínios e SNI vêm da rede e podem ser hostis: no modo texto, caracteres de controle viram `?`; no JSON, o escape é o do `serde_json`.
+
+### Resumo ao encerrar, perdas e contadores
+
+Ao sair, o sensor imprime no stderr um resumo (duração, pacotes e bytes, eventos entregues ou impressos, **perdas** e o que foi visto e ignorado). Perdas são dados que deviam ter sido processados e não foram; "ignorados" é tráfego que o sensor viu e decidiu não transformar em evento (política de emissão, ARP e afins). Um replay que termina sem nenhuma sessão com o Core avisa que os eventos não chegaram a lugar nenhum e sugere `--print`.
+
+O `StatusModulo` leva os mesmos números no mapa `contadores` (chaves documentadas em `ipc.proto`; o Core mostra as perdas na TUI e exporta `psychoscope_module_counter_total{module,counter}`):
+
+| Chave | O que conta |
+|---|---|
+| `perda.kernel`, `perda.interface` | Pacotes que o kernel e a interface descartaram (`ps_drop`, `ps_ifdrop` do libpcap). |
+| `perda.fila_captura` | Pacotes descartados porque a fila entre a captura e o decodificador encheu. |
+| `perda.fila_eventos` | Eventos descartados porque a fila para o cliente IPC encheu. |
+| `perda.ipc` | Eventos perdidos na reconexão com o Core ou numa falha de escrita no socket. |
+| `decode.malformado`, `decode.nao_suportado` | Quadros truncados/malformados; quadros de protocolo não suportado (ARP e afins, ruído normal). |
+| `ip.fragmento` | Fragmentos IP que não são o primeiro (não remontados). |
+| `politica.filtrados` | Pacotes decodificados que a política de emissão não transformou em evento. |
+| `remontagem.descartados` | ClientHellos fragmentados que a remontagem descartou sem completar. |
+
+Limitações conhecidas: DNS sobre TCP só considera a primeira mensagem do segmento; DNS só é reconhecido na porta 53 (sem mDNS nem DoT); ClientHello só é remontado quando cabe num único registro TLS; sem QUIC/DoH, HTTP ou túneis (GRE, VXLAN); fragmentos IP não são remontados.
 
 ### Remontagem de ClientHello TLS
 
@@ -29,7 +90,7 @@ Clientes com chave pós-quântica passam de 1,4 KB e o SNI pode cair no segundo 
 
 - só inicia buffer quando o primeiro segmento com payload de um fluxo abre um registro de handshake (`0x16 0x03 … 0x01`) que declara mais bytes do que o segmento traz — tráfego sem handshake não aloca nada;
 - aceita apenas segmentos estritamente em ordem; lacuna, retransmissão, sobreposição, RST ou pacote truncado pelo snaplen descartam o fluxo (sem evento TLS para ele);
-- limites: 18 KiB por fluxo, 4096 fluxos (despeja o mais antigo) e TTL de 5 s medido no relógio dos pacotes (também vale ao ler `--pcap-file`).
+- limites: 18 KiB por fluxo, 4096 fluxos no total (despeja o mais antigo), **64 por IP de origem** (um host não esvazia a tabela dos demais; o excedente não é remontado e conta em `remontagem.descartados`) e TTL de 5 s medido no relógio dos pacotes (também vale ao ler `--pcap-file`). Ao vivo, a cada segundo o TTL também é conferido pelo relógio do sistema, para liberar a memória quando o tráfego para.
 
 ## Privilégios
 
@@ -57,14 +118,15 @@ Na TUI: `tab` alterna os painéis, `j`/`k` navegam, `p` pausa, `r` retoma e `x` 
 ```
 cargo test                    # unitários + proptest + mock do Core
 scripts/demo.sh               # demo interativa: daemon + pcap sintético + TUI
-scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 60 eventos, 3 alertas, TUI em pty, comandos, shutdown
+scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 330 eventos, 10 alertas exatos, contadores, TUI em pty, comandos, SQLite, shutdown
+make bench                    # benchmark do caminho quente (veja docs/DESEMPENHO.md)
 scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn` (sem sudo)
 scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padrão 60); exige nightly
 ```
 
 ### Fuzzing
 
-O crate `fuzz/` (fora do workspace principal) tem cinco alvos do cargo-fuzz, todos com o contrato "nenhuma entrada causa panic": `decode_frame` (todos os `LinkType` + geração do evento), `parse_dns`, `parse_client_hello`, `read_frame` (framer async e decodificação protobuf, em runtime tokio `current_thread`) e `reassembler` (sequências de segmentos; confere os limites de memória).
+O crate `fuzz/` (fora do workspace principal) tem cinco alvos do cargo-fuzz, todos com o contrato "nenhuma entrada causa panic": `decode_frame` (sequências de quadros de todos os `LinkType`, com a remontagem compartilhada, + geração do evento), `parse_dns`, `parse_client_hello`, `read_frame` (framer async e decodificação protobuf, em runtime tokio `current_thread`) e `reassembler` (sequências de segmentos; confere os limites de memória).
 
 ```
 rustup toolchain install nightly --profile minimal
@@ -76,7 +138,7 @@ cargo +nightly fuzz run parse_dns   # interativo; crashes em fuzz/artifacts/<alv
 
 Precisa de `libpcap-dev` (ou `LIBPCAP_LIBDIR`, como acima). No CI, `.github/workflows/fuzz.yml` roda semanalmente (cron) e sob demanda (`workflow_dispatch`), 5 min por alvo, e publica os artefatos de crash.
 
-Depende de `psychoscope-proto` via `git` + `tag = "v0.2.0"` (`Cargo.lock` fixa o commit). Antes da publicação (ou offline): `source ../psychoscope-proto/scripts/local-deps.sh` faz o Cargo buscar a tag no checkout local; os scripts `e2e.sh`/`live_smoke.sh` já fazem isso quando o repositório irmão existe. Para iterar no contrato sem criar tags, use `[patch]` em `.cargo/config.toml` (ignorado pelo git).
+Depende de `psychoscope-proto` via `git` + `tag = "v0.4.0"` (`Cargo.lock` fixa o commit). Antes da publicação (ou offline): `source ../psychoscope-proto/scripts/local-deps.sh` faz o Cargo buscar a tag no checkout local; os scripts `e2e.sh`/`live_smoke.sh` já fazem isso quando o repositório irmão existe. Para iterar no contrato sem criar tags, use `[patch]` em `.cargo/config.toml` (ignorado pelo git).
 Se `libpcap-dev` não estiver instalado, mas a lib de runtime sim, crie um symlink `libpcap.so` num diretório qualquer e exporte `LIBPCAP_LIBDIR=<dir>` para linkar.
 
 ## Licença

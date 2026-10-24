@@ -7,7 +7,8 @@ Sensor de rede do Psychoscope em Rust: **Source → Decode → Sink**. Captura p
 - `src/capture/`: libpcap em thread dedicada (modo não bloqueante + `poll`) e leitura de pcap; canal limitado, descarte contado.
 - `src/protocols/`: parsers **puros** (ethernet, ip, tcp, udp, icmp, dns, tls) sobre `reader::Reader`; `decode_frame` percorre L2→L4.
 - `src/reassembly.rs`: remontagem estrita de ClientHello TLS em vários segmentos. `src/event.rs`: pacote → `EventoFluxoRede` (política `interesting`: DNS, ClientHello, TCP SYN/RST, ICMP; `all` emite tudo).
-- `src/pipeline.rs`: `decode_loop` e `SensorController`. `src/ipc/`: `framer.rs` e `client.rs` (Hello, reconexão com backoff, status, comandos), com o contrato `Controller`/`StatsSnapshot` em `client/controller.rs`. `src/main.rs` só liga as etapas (captura, decode, cliente, sinais, encerramento).
+- `src/pipeline.rs`: `decode_loop` (estado em `Decoder`, expiração ociosa da remontagem ao vivo) e `SensorController` (contadores no `StatsSnapshot`). `src/ipc/`: `framer.rs` e `client.rs` (Hello, reconexão com backoff, status, comandos), com o contrato `Controller`/`StatsSnapshot` em `client/controller.rs`. `src/main.rs` só liga as etapas (captura, decode, destino Core ou `--print`, sinais, resumo, encerramento).
+- Diagnóstico e uso: `src/interfaces.rs` (`--list-interfaces`), `src/check.rs` (`--check`), `src/explain.rs` (erros → instruções, funções puras), `src/output.rs` (`--print`, texto e JSON), `src/summary.rs` (resumo final e de `-v`). `benches/hot_path.rs` + `make bench` medem o caminho quente (`docs/DESEMPENHO.md`).
 - Testes dos módulos grandes ficam ao lado, em `<modulo>/tests.rs` (`ipc/client`, `reassembly`, `capture/sniffer`).
 - `fuzz/` (cargo-fuzz), `scripts/` (`demo.sh`, `e2e.sh`, `live_smoke.sh`, `fuzz.sh`, `gen_pcap.py`).
 
