@@ -295,6 +295,7 @@ impl<C: Controller> Client<C> {
             uso_cpu_percent: cpu.sample(),
             pacotes_capturados: s.packets_captured,
             pacotes_descartados: s.packets_dropped,
+            contadores: Default::default(),
         }))
     }
 

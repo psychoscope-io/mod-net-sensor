@@ -10,7 +10,7 @@ libc = "0.2.191"
 pcap = "2.5.0"
 prost = "0.14.4"
 prost-types = "0.14.4"
-psychoscope-proto = { git = "https://github.com/psychoscope-io/psychoscope-proto", tag = "v0.2.0", version = "0.1" }
+psychoscope-proto = { git = "https://github.com/psychoscope-io/psychoscope-proto", tag = "v0.4.0", version = "0.1" }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "macros", "io-util", "net", "signal", "time", "rt-multi-thread", "sync"] }
 
