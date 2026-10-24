@@ -5,6 +5,9 @@ use clap::{ArgGroup, Parser};
 
 use crate::event::EmitPolicy;
 
+/// Teto da memoria que a fila de pacotes pode reter no pior caso (`queue_size * snaplen`).
+pub const MAX_QUEUE_BYTES: u64 = 256 << 20;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "mod-net-sensor",
@@ -72,6 +75,21 @@ impl Config {
                 "--exit-on-eof so pode ser usado com --pcap-file",
             ));
         }
+        let worst = cfg.queue_size as u64 * cfg.snaplen as u64;
+        if worst > MAX_QUEUE_BYTES {
+            let fit = MAX_QUEUE_BYTES / cfg.snaplen as u64;
+            return Err(<Self as clap::CommandFactory>::command().error(
+                clap::error::ErrorKind::ValueValidation,
+                format!(
+                    "--queue-size {} com --snaplen {} pode reter {} MiB na fila de pacotes (maximo {} MiB): \
+                     use --queue-size {fit} ou menos, ou reduza --snaplen",
+                    cfg.queue_size,
+                    cfg.snaplen,
+                    worst >> 20,
+                    MAX_QUEUE_BYTES >> 20,
+                ),
+            ));
+        }
         Ok(cfg)
     }
 
@@ -109,5 +127,17 @@ mod tests {
         assert!(parse(&["-i", "lo", "--snaplen", "10"]).is_err());
         assert!(parse(&["-i", "lo", "--queue-size", "1"]).is_err());
         assert!(parse(&["-i", "lo", "--emit", "nada"]).is_err());
+    }
+
+    #[test]
+    fn queue_memory_is_bounded() {
+        let at_limit = parse(&["-i", "lo", "--snaplen", "65535", "--queue-size", "4096"]);
+        assert!(at_limit.is_ok(), "{:?}", at_limit.err());
+        let e = parse(&["-i", "lo", "--snaplen", "65535", "--queue-size", "8192"]).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("--queue-size 4096 ou menos"), "{msg}");
+        assert!(parse(&["--pcap-file", "x", "--queue-size", "1000000"]).is_err());
+        // o padrao cabe com folga
+        assert!(parse(&["-i", "lo"]).is_ok());
     }
 }
