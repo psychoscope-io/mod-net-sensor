@@ -20,6 +20,35 @@ pub struct PipelineCounters {
     pub events_queue_dropped: AtomicU64,
 }
 
+/// Estado do decodificador: remontagem TLS e politica de emissao.
+struct Decoder {
+    reasm: Reassembler,
+    policy: EmitPolicy,
+    counters: Arc<PipelineCounters>,
+}
+
+impl Decoder {
+    /// Decodifica um pacote bruto; `None` se foi descartado (erro de decode ou politica).
+    fn handle(&mut self, p: &Captured) -> Option<EventoFluxoRede> {
+        let pkt = match decode_frame(p.link, &p.data) {
+            Ok(pkt) => pkt,
+            Err(_) => {
+                self.counters.decode_errors.fetch_add(1, Relaxed);
+                return None;
+            }
+        };
+        let truncated = p.data.len() < p.wire_len as usize;
+        build_event_reassembling(
+            &mut self.reasm,
+            &pkt,
+            p.ts,
+            u64::from(p.wire_len),
+            truncated,
+            self.policy,
+        )
+    }
+}
+
 /// Consome pacotes brutos, decodifica e emite eventos. Termina quando a captura fecha o canal.
 /// `lossless` (leitura de arquivo) espera espaco em vez de descartar.
 pub async fn decode_loop(
@@ -29,38 +58,29 @@ pub async fn decode_loop(
     lossless: bool,
     counters: Arc<PipelineCounters>,
 ) {
-    let mut reasm = Reassembler::new();
+    let mut decoder = Decoder {
+        reasm: Reassembler::new(),
+        policy,
+        counters: counters.clone(),
+    };
     while let Some(p) = rx.recv().await {
-        let pkt = match decode_frame(p.link, &p.data) {
-            Ok(pkt) => pkt,
-            Err(_) => {
-                counters.decode_errors.fetch_add(1, Relaxed);
-                continue;
-            }
-        };
-        let truncated = p.data.len() < p.wire_len as usize;
-        let Some(ev) = build_event_reassembling(
-            &mut reasm,
-            &pkt,
-            p.ts,
-            u64::from(p.wire_len),
-            truncated,
-            policy,
-        ) else {
+        let Some(ev) = decoder.handle(&p) else {
             continue;
         };
-        if lossless {
-            if tx.send(ev).await.is_err() {
-                break;
-            }
+        let delivered = if lossless {
+            tx.send(ev).await.is_ok()
         } else {
             match tx.try_send(ev) {
-                Ok(()) => {}
+                Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     counters.events_queue_dropped.fetch_add(1, Relaxed);
+                    true
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
             }
+        };
+        if !delivered {
+            break;
         }
     }
 }
