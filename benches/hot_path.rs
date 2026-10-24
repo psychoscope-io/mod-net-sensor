@@ -10,10 +10,19 @@ use std::time::{Duration, SystemTime};
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use mod_net_sensor::capture::sniffer::Captured;
+use mod_net_sensor::event::to_timestamp;
 use mod_net_sensor::event::{EmitPolicy, build_event_reassembling};
+use mod_net_sensor::ipc::framer::{append_frame, write_message};
 use mod_net_sensor::pipeline::{PipelineCounters, decode_loop};
 use mod_net_sensor::protocols::{LinkType, decode_frame};
 use mod_net_sensor::reassembly::Reassembler;
+use psychoscope_proto::v1::mensagem_ipc::Payload;
+use psychoscope_proto::v1::{
+    EventoFluxoRede, EventoTelemetria, MensagemIpc, ProtocoloTransporte,
+    evento_fluxo_rede::MetadadosDns, evento_fluxo_rede::MetadadosL7, evento_telemetria,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 /// Conta chamadas e bytes de alocacao para reportar alocacoes por pacote.
@@ -173,5 +182,94 @@ fn bench_decode_loop(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_decode_event, bench_decode_loop);
+/// Mensagens de telemetria como o cliente IPC as monta (evento DNS dentro do envelope).
+fn telemetry_messages(n: usize) -> Vec<MensagemIpc> {
+    (0..n)
+        .map(|i| MensagemIpc {
+            id_mensagem: format!("mod-net-sensor-{i}"),
+            timestamp: Some(to_timestamp(SystemTime::now())),
+            payload: Some(Payload::Telemetria(EventoTelemetria {
+                id_modulo: "mod-net-sensor".to_string(),
+                dado: Some(evento_telemetria::Dado::Rede(EventoFluxoRede {
+                    ip_origem: "192.168.0.8".to_string(),
+                    ip_destino: "192.168.0.1".to_string(),
+                    porta_origem: 51000,
+                    porta_destino: 53,
+                    protocolo: ProtocoloTransporte::ProtoUdp as i32,
+                    tamanho_bytes: 74,
+                    metadados_l7: Some(MetadadosL7::Dns(MetadadosDns {
+                        dominio_consultado: "www.example.com".to_string(),
+                        tipo_registro: 1,
+                        ..Default::default()
+                    })),
+                    timestamp_captura: Some(to_timestamp(SystemTime::now())),
+                    ..Default::default()
+                })),
+            })),
+        })
+        .collect()
+}
+
+/// Escrita de eventos num socket Unix real (um leitor descarta o que chega): mede a
+/// serializacao, as alocacoes e as chamadas de escrita do caminho do cliente IPC.
+fn bench_ipc_write(c: &mut Criterion) {
+    const N: usize = 4096;
+    let msgs = telemetry_messages(N);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("runtime do benchmark");
+    let mut g = c.benchmark_group("ipc_write");
+    g.throughput(Throughput::Elements(N as u64));
+    g.sample_size(30);
+    g.bench_function("um_frame_por_escrita", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                let (mut tx, mut rx) = UnixStream::pair().expect("socketpair");
+                let reader = tokio::spawn(async move {
+                    let mut sink = vec![0u8; 1 << 16];
+                    while rx.read(&mut sink).await.map(|n| n > 0).unwrap_or(false) {}
+                });
+                for m in &msgs {
+                    write_message(&mut tx, m).await.expect("escrita");
+                }
+                drop(tx);
+                reader.await.expect("leitor");
+            })
+        })
+    });
+    // como o cliente envia: frames de ate `batch` eventos num buffer reaproveitado, uma escrita
+    for batch in [16usize, 64] {
+        g.bench_function(format!("lote_de_{batch}"), |b| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let (mut tx, mut rx) = UnixStream::pair().expect("socketpair");
+                    let reader = tokio::spawn(async move {
+                        let mut sink = vec![0u8; 1 << 16];
+                        while rx.read(&mut sink).await.map(|n| n > 0).unwrap_or(false) {}
+                    });
+                    let mut buf = Vec::new();
+                    for chunk in msgs.chunks(batch) {
+                        buf.clear();
+                        for m in chunk {
+                            append_frame(&mut buf, m).expect("frame");
+                        }
+                        tx.write_all(&buf).await.expect("escrita");
+                    }
+                    drop(tx);
+                    reader.await.expect("leitor");
+                })
+            })
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_decode_event,
+    bench_decode_loop,
+    bench_ipc_write
+);
 criterion_main!(benches);

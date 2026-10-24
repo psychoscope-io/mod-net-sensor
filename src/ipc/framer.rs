@@ -23,6 +23,8 @@ pub enum FrameError {
     Truncated,
     #[error("decodificacao protobuf: {0}")]
     Decode(#[from] prost::DecodeError),
+    #[error("codificacao protobuf: {0}")]
+    Encode(#[from] prost::EncodeError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -99,12 +101,42 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Acrescenta a `buf` o frame de `msg` (prefixo de tamanho + protobuf), serializando direto
+/// no buffer, sem copia intermediaria. Em erro, `buf` volta ao tamanho que tinha. Permite
+/// juntar varios frames num buffer e enviar tudo numa escrita so.
+pub fn append_frame(buf: &mut Vec<u8>, msg: &MensagemIpc) -> Result<(), FrameError> {
+    let start = buf.len();
+    buf.extend_from_slice(&[0; HEADER_SIZE]);
+    let encoded = msg.encode(buf);
+    let size = buf.len() - start - HEADER_SIZE;
+    let declared = u32::try_from(size).unwrap_or(u32::MAX);
+    let checked = match encoded {
+        Err(e) => Err(e.into()),
+        Ok(()) if size == 0 => Err(FrameError::Empty),
+        Ok(()) if declared > MAX_FRAME_SIZE => Err(FrameError::TooLarge {
+            declared,
+            max: MAX_FRAME_SIZE,
+        }),
+        Ok(()) => Ok(()),
+    };
+    if checked.is_err() {
+        buf.truncate(start);
+        return checked;
+    }
+    buf[start..start + HEADER_SIZE].copy_from_slice(&declared.to_be_bytes());
+    Ok(())
+}
+
 /// Serializa `msg` e o envia como um frame.
 pub async fn write_message<W: AsyncWrite + Unpin>(
     w: &mut W,
     msg: &MensagemIpc,
 ) -> Result<(), FrameError> {
-    write_frame(w, &msg.encode_to_vec()).await
+    let mut buf = Vec::with_capacity(HEADER_SIZE + msg.encoded_len());
+    append_frame(&mut buf, msg)?;
+    w.write_all(&buf).await?;
+    w.flush().await?;
+    Ok(())
 }
 
 /// Le um frame e o decodifica como `MensagemIpc`. `Ok(None)` = EOF limpo.
@@ -334,5 +366,61 @@ mod tests {
                 });
             }
         }
+    }
+    fn msg(id: &str) -> MensagemIpc {
+        MensagemIpc {
+            id_mensagem: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn append_frame_matches_write_frame_byte_for_byte() {
+        let m = msg("mod-net-sensor-7");
+        let mut appended = Vec::new();
+        append_frame(&mut appended, &m).unwrap();
+        let mut written = Vec::new();
+        rt().block_on(write_frame(&mut written, &m.encode_to_vec()))
+            .unwrap();
+        assert_eq!(appended, written);
+    }
+
+    #[test]
+    fn appended_frames_read_back_in_order() {
+        let mut buf = vec![];
+        for id in ["a", "bb", "ccc"] {
+            append_frame(&mut buf, &msg(id)).unwrap();
+        }
+        rt().block_on(async {
+            let mut r = Cursor::new(buf);
+            for id in ["a", "bb", "ccc"] {
+                assert_eq!(
+                    read_message(&mut r, 0).await.unwrap().unwrap().id_mensagem,
+                    id
+                );
+            }
+            assert!(read_message(&mut r, 0).await.unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn append_frame_errors_leave_the_buffer_as_it_was() {
+        let mut buf = b"antes".to_vec();
+        // mensagem vazia serializa em 0 bytes: frame vazio e violacao do protocolo
+        assert!(matches!(
+            append_frame(&mut buf, &MensagemIpc::default()),
+            Err(FrameError::Empty)
+        ));
+        assert_eq!(buf, b"antes");
+        // acima de 1 MiB
+        let huge = msg(&"x".repeat(MAX_FRAME_SIZE as usize + 1));
+        assert!(matches!(
+            append_frame(&mut buf, &huge),
+            Err(FrameError::TooLarge { .. })
+        ));
+        assert_eq!(buf, b"antes");
+        // e o buffer continua utilizavel
+        append_frame(&mut buf, &msg("ok")).unwrap();
+        assert!(buf.starts_with(b"antes") && buf.len() > 5 + HEADER_SIZE);
     }
 }
