@@ -5,7 +5,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use super::DecodeError;
 use super::reader::Reader;
 
-const MAX_NAME_LEN: usize = 255;
+/// Maior nome em texto, sem o ponto final: 253 caracteres, o que cabe nos 255 octetos do
+/// formato de rede (RFC 1035).
+const MAX_NAME_LEN: usize = 253;
 const MAX_POINTER_JUMPS: usize = 16;
 const MAX_QUESTIONS: u16 = 16;
 const MAX_ANSWERS: u16 = 64;
@@ -300,6 +302,32 @@ pub(crate) mod tests {
         let name = format!("{label}.{label}.{label}.{label}.{label}");
         assert!(matches!(
             parse_dns(&query(&name, 1)),
+            Err(DecodeError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn name_length_limit_is_exactly_253_characters() {
+        // 63 + 63 + 63 + 61 caracteres e 3 pontos = 253: o maior nome valido
+        let at_limit = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
+        assert_eq!(at_limit.len(), 253);
+        assert_eq!(parse_dns(&query(&at_limit, 1)).unwrap().domain, at_limit);
+        // um caractere a mais nao cabe nos 255 octetos da rede: antes passava (limite 255)
+        let over = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(62)
+        );
+        assert!(matches!(
+            parse_dns(&query(&over, 1)),
             Err(DecodeError::Malformed)
         ));
     }
