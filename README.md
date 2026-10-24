@@ -69,7 +69,7 @@ Domínios e SNI vêm da rede e podem ser hostis: no modo texto, caracteres de co
 
 Ao sair, o sensor imprime no stderr um resumo (duração, pacotes e bytes, eventos entregues ou impressos, **perdas** e o que foi visto e ignorado). Perdas são dados que deviam ter sido processados e não foram; "ignorados" é tráfego que o sensor viu e decidiu não transformar em evento (política de emissão, ARP e afins). Um replay que termina sem nenhuma sessão com o Core avisa que os eventos não chegaram a lugar nenhum e sugere `--print`.
 
-O `StatusModulo` leva os mesmos números no mapa `contadores` (chaves documentadas em `ipc.proto`; o Core mostra as perdas na TUI e exporta `psychoscope_module_counter_total{module,counter}`):
+O `StatusModulo` leva os mesmos números no mapa `contadores` (chaves documentadas em `ipc.proto`; o Core aceita até 64 chaves de até 64 caracteres em `[a-z0-9._-]` e descarta o resto; o Core mostra as perdas na TUI e exporta `psychoscope_module_counter_total{module,counter}`):
 
 | Chave | O que conta |
 |---|---|
