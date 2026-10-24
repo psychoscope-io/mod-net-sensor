@@ -144,4 +144,18 @@ $CLI alerts --history --since 1h | tail -1 | grep -qx -- "-- 10 de 10 alertas --
 python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE "Alertas (10)" "Beacon" "Força bruta" || fail "TUI apos reinicio"
 echo "ok: 10 alertas recuperados do SQLite apos reiniciar o daemon (CLI e TUI)"
 kill -TERM "$DPID"; wait "$DPID"; DPID=""
+
+# Sem Core: --print mostra os mesmos eventos, --check confere o ambiente e um replay que nunca
+# falou com o Core avisa em vez de parecer sucesso.
+"$SENSOR" --pcap-file "$TMP/t.pcap" --print > "$TMP/print.txt" 2> "$TMP/print.err" || fail "--print"
+[ "$(wc -l < "$TMP/print.txt")" = "$EXPECTED" ] || fail "--print: esperado $EXPECTED eventos, obtido $(wc -l < "$TMP/print.txt")"
+grep -q "DNS consulta example.com" "$TMP/print.txt" || fail "--print sem a consulta DNS"
+grep -q "perdas: nenhuma" "$TMP/print.err" || fail "resumo do --print: $(cat "$TMP/print.err")"
+"$SENSOR" --pcap-file "$TMP/t.pcap" --print=json | python3 -c 'import json,sys; n=sum(1 for l in sys.stdin if json.loads(l)["protocolo"]); sys.exit(0 if n == int(sys.argv[1]) else 1)' "$EXPECTED" || fail "--print=json invalido"
+"$SENSOR" --check --pcap-file "$TMP/t.pcap" --bpf "udp port 53" --print > "$TMP/check.txt" || fail "--check: $(cat "$TMP/check.txt")"
+if "$SENSOR" --check --pcap-file "$TMP/nao-existe.pcap" > "$TMP/check_bad.txt"; then fail "--check deveria falhar com arquivo inexistente"; fi
+grep -q "como corrigir" "$TMP/check_bad.txt" || fail "--check sem instrucao: $(cat "$TMP/check_bad.txt")"
+"$SENSOR" --pcap-file "$TMP/t.pcap" --exit-on-eof --socket "$TMP/sem-core.sock" 2> "$TMP/nocore.err" || true
+grep -q "AVISO: nenhum evento chegou ao Core" "$TMP/nocore.err" || fail "replay sem Core deveria avisar: $(cat "$TMP/nocore.err")"
+echo "ok: sem o Core: --print (texto e JSON), --check e o aviso de replay sem Core"
 echo "E2E OK"
