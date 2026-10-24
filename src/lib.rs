@@ -2,6 +2,8 @@
 pub mod capture;
 pub mod config;
 pub mod event;
+pub mod explain;
+pub mod interfaces;
 pub mod ipc;
 pub mod pipeline;
 pub mod procstats;
