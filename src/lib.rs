@@ -5,6 +5,7 @@ pub mod event;
 pub mod explain;
 pub mod interfaces;
 pub mod ipc;
+pub mod output;
 pub mod pipeline;
 pub mod procstats;
 pub mod protocols;
