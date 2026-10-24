@@ -301,6 +301,15 @@ async fn reconnects_after_core_drops_connection_and_counts_drops_meanwhile() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     let (mut core2, hello2) = handshake(&h.listener).await; // reconectou e refez o Hello
     assert_eq!(hello2.id_modulo, "mod-net-sensor");
+    // o cliente conta a sessao ao ler a resposta do Core: espera por condicao, sem sleep fixo
+    let counted = timeout(Duration::from_secs(2), async {
+        while h.counters.sessions.load(Relaxed) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(counted.is_ok(), "uma sessao por Hello aceito");
+    assert_eq!(h.counters.sessions.load(Relaxed), 2);
     assert!(h.counters.events_dropped.load(Relaxed) <= 5);
 
     h.events.send(ev("depois")).await.unwrap();
@@ -588,4 +597,19 @@ async fn a_burst_through_the_real_session_arrives_complete_and_in_order() {
     assert_eq!(h.counters.events_sent.load(Relaxed), 200);
     h.shutdown.send(true).unwrap();
     let _ = h.task.await;
+}
+
+#[test]
+fn connect_failures_to_the_socket_carry_a_hint_and_other_errors_do_not() {
+    let sock = std::path::Path::new("/run/psychoscope/core.sock");
+    let missing = SessionError::Io(std::io::ErrorKind::NotFound.into());
+    assert!(
+        connect_hint(&missing, sock)
+            .contains("dica: o Core nao esta escutando em /run/psychoscope/core.sock")
+    );
+    assert_eq!(connect_hint(&SessionError::Closed, sock), "");
+    assert_eq!(
+        connect_hint(&SessionError::Io(std::io::ErrorKind::TimedOut.into()), sock),
+        ""
+    );
 }

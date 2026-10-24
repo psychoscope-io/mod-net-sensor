@@ -5,7 +5,7 @@
 //! Enquanto desconectado, os eventos recebidos sao descartados (e contados): a captura
 //! nunca fica retida esperando o Core.
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, SystemTime};
@@ -22,6 +22,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval, sleep, timeout};
 
 use super::framer::{FrameError, append_frame, read_message, write_message};
 use crate::event::to_timestamp;
+use crate::explain;
 use crate::procstats::{CpuMeter, rss_mb};
 
 /// Versao do protocolo IPC falada por este modulo (deve casar com o Core).
@@ -66,6 +67,8 @@ impl ClientConfig {
 /// Contadores do proprio cliente, compartilhados com o restante do processo.
 #[derive(Debug, Default)]
 pub struct ClientCounters {
+    /// Sessoes que o Core aceitou (0 = o sensor ainda nunca falou com o Core).
+    pub sessions: AtomicU64,
     pub events_sent: AtomicU64,
     /// Eventos descartados por estar desconectado ou por falha de escrita.
     pub events_dropped: AtomicU64,
@@ -159,6 +162,7 @@ impl<C: Controller> Client<C> {
             }
             match self.connect().await {
                 Ok((stream, core_interval)) => {
+                    self.counters.sessions.fetch_add(1, Relaxed);
                     tracing_log(format_args!(
                         "conectado ao core ({})",
                         self.cfg.socket.display()
@@ -174,7 +178,8 @@ impl<C: Controller> Client<C> {
                     }
                 }
                 Err(e) => tracing_log(format_args!(
-                    "falha ao conectar: {e} (nova tentativa em {backoff:?})"
+                    "falha ao conectar: {e} (nova tentativa em {backoff:?}){}",
+                    connect_hint(&e, &self.cfg.socket)
                 )),
             }
 
@@ -427,6 +432,15 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Linha de dica (com recuo) para a falha ao abrir o socket do Core; vazia nos outros erros.
+fn connect_hint(e: &SessionError, socket: &Path) -> String {
+    match e {
+        SessionError::Io(io) => explain::socket_hint(io.kind(), socket)
+            .map_or_else(String::new, |h| format!("\n  dica: {h}")),
+        _ => String::new(),
     }
 }
 

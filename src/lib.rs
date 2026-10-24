@@ -11,3 +11,4 @@ pub mod pipeline;
 pub mod procstats;
 pub mod protocols;
 pub mod reassembly;
+pub mod summary;
