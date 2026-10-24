@@ -573,4 +573,43 @@ mod tests {
         d.expire_idle(Duration::from_secs(60)); // sem o que expirar: nao conta de novo
         assert_eq!(counters.reassembly_discarded.load(Relaxed), 1);
     }
+    mod prop {
+        use super::*;
+        use crate::protocols::ALL_LINKS;
+        use crate::reassembly::MAX_FLOWS;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+            /// Qualquer sequencia de quadros, de qualquer tipo de enlace, passa pelo decodificador
+            /// (com remontagem compartilhada) sem panico e sem estourar a tabela de fluxos.
+            #[test]
+            fn arbitrary_frame_sequences_never_panic(
+                frames in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..300), 0..24),
+                policy_all in any::<bool>(),
+            ) {
+                let policy = if policy_all { EmitPolicy::All } else { EmitPolicy::Interesting };
+                let counters = Arc::new(PipelineCounters::default());
+                let mut d = Decoder {
+                    reasm: Reassembler::new(),
+                    reasm_published: 0,
+                    policy,
+                    counters,
+                };
+                for (i, data) in frames.into_iter().enumerate() {
+                    for link in ALL_LINKS {
+                        let p = Captured {
+                            ts: SystemTime::UNIX_EPOCH + Duration::from_millis(i as u64),
+                            wire_len: data.len() as u32,
+                            link,
+                            data: data.clone(),
+                        };
+                        let _ = d.handle(&p);
+                        prop_assert!(d.reasm.len() <= MAX_FLOWS);
+                    }
+                }
+            }
+        }
+    }
 }
