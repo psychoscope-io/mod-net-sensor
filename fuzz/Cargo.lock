@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "mod-net-sensor"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "libc",
@@ -560,7 +560,7 @@ checksum = "263a3f48f01e7309e857138bd47f785585b4a005e8e56c6d2824ce91195999c3"
 [[package]]
 name = "psychoscope-proto"
 version = "0.1.0"
-source = "git+https://github.com/psychoscope-io/psychoscope-proto?tag=v0.1.0#7887544e7a8c3aabb07fa1d29ed5f750cf44fabd"
+source = "git+https://github.com/psychoscope-io/psychoscope-proto?tag=v0.4.0#3d6bc7745d2665f31cebaeccc157e639543e7244"
 dependencies = [
  "prost",
  "prost-build",
@@ -713,9 +713,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.54.0"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0c168a474b95bfecfe908a65d4bdffc523144b649a74c09c286afb35d53e0bc"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
