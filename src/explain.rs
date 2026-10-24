@@ -37,27 +37,53 @@ pub fn capture_hint(error: &str, ctx: &CaptureContext<'_>) -> Option<String> {
         };
     }
     let name = ctx.interface.unwrap_or("<interface>");
-    if has(&["operation not permitted", "permission denied"]) {
+    // sem permissao o libpcap reclama de permissao mesmo para uma interface que nao existe:
+    // se a lista mostra que o nome esta errado, esse e o problema a corrigir primeiro
+    if interface_is_missing(ctx) {
+        Some(missing_interface_hint(name, ctx.available))
+    } else if has(&["operation not permitted", "permission denied"]) {
         Some(format!(
             "a captura exige CAP_NET_RAW e CAP_NET_ADMIN: uma vez, como administrador, rode `sudo setcap cap_net_raw,cap_net_admin=eip {}` (ou execute o sensor como root)",
-            ctx.exe
+            shell_quote(ctx.exe)
         ))
     } else if has(&["no such device", "no such file"]) {
-        let list = if ctx.available.is_empty() {
-            "veja as interfaces com --list-interfaces".to_string()
-        } else {
-            format!(
-                "interfaces disponiveis: {} (detalhes com --list-interfaces)",
-                ctx.available
-            )
-        };
-        Some(format!("a interface '{name}' nao existe; {list}"))
+        Some(missing_interface_hint(name, ctx.available))
     } else if has(&["not up"]) {
         Some(format!(
             "a interface '{name}' esta desativada: ative com `sudo ip link set {name} up`"
         ))
     } else {
         bpf_hint(&e)
+    }
+}
+
+/// O nome nao consta na lista de interfaces (so vale quando a lista foi obtida).
+fn interface_is_missing(ctx: &CaptureContext<'_>) -> bool {
+    match ctx.interface {
+        Some(name) if !ctx.available.is_empty() => !ctx.available.split(", ").any(|n| n == name),
+        _ => false,
+    }
+}
+
+fn missing_interface_hint(name: &str, available: &str) -> String {
+    let list = if available.is_empty() {
+        "veja as interfaces com --list-interfaces".to_string()
+    } else {
+        format!("interfaces disponiveis: {available} (detalhes com --list-interfaces)")
+    };
+    format!("a interface '{name}' nao existe; {list}")
+}
+
+/// Texto seguro para colar num shell: entre aspas simples se tiver espaco ou metacaractere.
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | ',' | ':' | '=')
+        });
+    if plain {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -205,5 +231,56 @@ mod tests {
                 .contains("longo demais")
         );
         assert_eq!(socket_hint(ErrorKind::TimedOut, p), None);
+    }
+
+    #[test]
+    fn a_wrong_interface_name_beats_the_permission_hint() {
+        // sem privilegio o libpcap diz "Operation not permitted" ate para um nome que nao existe
+        let h = capture_hint(
+            "socket: Operation not permitted",
+            &live("eth0", "lo, wlp2s0"),
+        )
+        .unwrap();
+        assert!(
+            h.contains("'eth0' nao existe") && h.contains("lo, wlp2s0") && !h.contains("setcap"),
+            "{h}"
+        );
+        // nome certo na lista: a permissao e o problema
+        assert!(
+            capture_hint("socket: Operation not permitted", &live("lo", "lo, wlp2s0"))
+                .unwrap()
+                .contains("setcap")
+        );
+        // lista desconhecida: nao da para afirmar que o nome esta errado
+        assert!(
+            capture_hint("socket: Operation not permitted", &live("eth0", ""))
+                .unwrap()
+                .contains("setcap")
+        );
+    }
+
+    #[test]
+    fn the_setcap_path_is_safe_to_paste() {
+        assert_eq!(
+            shell_quote("/usr/local/bin/mod-net-sensor"),
+            "/usr/local/bin/mod-net-sensor"
+        );
+        assert_eq!(
+            shell_quote("/home/ana maria/mod net"),
+            "'/home/ana maria/mod net'"
+        );
+        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+        assert_eq!(shell_quote("/tmp/$(rm -rf x)"), "'/tmp/$(rm -rf x)'");
+        let ctx = CaptureContext {
+            interface: Some("lo"),
+            pcap_file: None,
+            available: "lo",
+            exe: "/opt/meu sensor/bin",
+        };
+        assert!(
+            capture_hint("Operation not permitted", &ctx)
+                .unwrap()
+                .contains("eip '/opt/meu sensor/bin'")
+        );
     }
 }
