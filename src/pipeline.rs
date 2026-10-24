@@ -9,13 +9,21 @@ use tokio::sync::{mpsc, oneshot};
 use crate::capture::sniffer::{CaptureCounters, Captured, ReconfigRequest};
 use crate::event::{EmitPolicy, build_event_reassembling};
 use crate::ipc::client::{Controller, StatsSnapshot};
-use crate::protocols::decode_frame;
+use crate::protocols::{DecodeError, Transport, decode_frame};
 use crate::reassembly::Reassembler;
 
 #[derive(Default, Debug)]
 pub struct PipelineCounters {
-    /// Quadros que nao puderam ser decodificados (truncados, malformados, protocolo nao suportado).
-    pub decode_errors: AtomicU64,
+    /// Quadros truncados ou malformados.
+    pub decode_malformed: AtomicU64,
+    /// Quadros de protocolo nao suportado (ARP e afins): ruido esperado, nao defeito.
+    pub decode_unsupported: AtomicU64,
+    /// Pacotes decodificados que a politica de emissao nao transformou em evento.
+    pub policy_filtered: AtomicU64,
+    /// Fragmentos IP que nao sao o primeiro (o sensor nao remonta IP).
+    pub ip_fragments: AtomicU64,
+    /// ClientHellos fragmentados que a remontagem descartou sem completar.
+    pub reassembly_discarded: AtomicU64,
     /// Eventos descartados porque o canal para o cliente IPC estava cheio.
     pub events_queue_dropped: AtomicU64,
 }
@@ -23,6 +31,8 @@ pub struct PipelineCounters {
 /// Estado do decodificador: remontagem TLS e politica de emissao.
 struct Decoder {
     reasm: Reassembler,
+    /// Descartes da remontagem ja publicados em `counters`.
+    reasm_published: u64,
     policy: EmitPolicy,
     counters: Arc<PipelineCounters>,
 }
@@ -32,20 +42,44 @@ impl Decoder {
     fn handle(&mut self, p: &Captured) -> Option<EventoFluxoRede> {
         let pkt = match decode_frame(p.link, &p.data) {
             Ok(pkt) => pkt,
-            Err(_) => {
-                self.counters.decode_errors.fetch_add(1, Relaxed);
+            Err(e) => {
+                let counter = match e {
+                    DecodeError::Unsupported => &self.counters.decode_unsupported,
+                    DecodeError::Truncated | DecodeError::Malformed => {
+                        &self.counters.decode_malformed
+                    }
+                };
+                counter.fetch_add(1, Relaxed);
                 return None;
             }
         };
+        if matches!(pkt.transport, Transport::Fragment { .. }) {
+            self.counters.ip_fragments.fetch_add(1, Relaxed);
+        }
         let truncated = p.data.len() < p.wire_len as usize;
-        build_event_reassembling(
+        let ev = build_event_reassembling(
             &mut self.reasm,
             &pkt,
             p.ts,
             u64::from(p.wire_len),
             truncated,
             self.policy,
-        )
+        );
+        self.publish_reassembly_discards();
+        if ev.is_none() {
+            self.counters.policy_filtered.fetch_add(1, Relaxed);
+        }
+        ev
+    }
+
+    fn publish_reassembly_discards(&mut self) {
+        let total = self.reasm.discarded();
+        if total != self.reasm_published {
+            self.counters
+                .reassembly_discarded
+                .fetch_add(total - self.reasm_published, Relaxed);
+            self.reasm_published = total;
+        }
     }
 }
 
@@ -60,6 +94,7 @@ pub async fn decode_loop(
 ) {
     let mut decoder = Decoder {
         reasm: Reassembler::new(),
+        reasm_published: 0,
         policy,
         counters: counters.clone(),
     };
@@ -122,12 +157,29 @@ impl Controller for SensorController {
     }
 
     fn stats(&self) -> StatsSnapshot {
+        let (c, p) = (&self.capture, &self.pipeline);
+        let losses = [
+            ("perda.kernel", c.kernel_dropped.load(Relaxed)),
+            ("perda.interface", c.interface_dropped.load(Relaxed)),
+            ("perda.fila_captura", c.channel_dropped.load(Relaxed)),
+            ("perda.fila_eventos", p.events_queue_dropped.load(Relaxed)),
+        ];
+        let mut counters = losses.to_vec();
+        counters.extend([
+            ("decode.malformado", p.decode_malformed.load(Relaxed)),
+            ("decode.nao_suportado", p.decode_unsupported.load(Relaxed)),
+            ("ip.fragmento", p.ip_fragments.load(Relaxed)),
+            ("politica.filtrados", p.policy_filtered.load(Relaxed)),
+            (
+                "remontagem.descartados",
+                p.reassembly_discarded.load(Relaxed),
+            ),
+        ]);
         StatsSnapshot {
-            packets_captured: self.capture.captured.load(Relaxed),
-            bytes: self.capture.bytes.load(Relaxed),
-            packets_dropped: self.capture.kernel_dropped.load(Relaxed)
-                + self.capture.channel_dropped.load(Relaxed)
-                + self.pipeline.events_queue_dropped.load(Relaxed),
+            packets_captured: c.captured.load(Relaxed),
+            bytes: c.bytes.load(Relaxed),
+            packets_dropped: losses.iter().map(|(_, n)| n).sum(),
+            counters,
         }
     }
 }
@@ -172,7 +224,9 @@ mod tests {
 
         assert!(erx.recv().await.is_some());
         assert!(erx.recv().await.is_none(), "so um evento esperado");
-        assert_eq!(counters.decode_errors.load(Relaxed), 2);
+        assert_eq!(counters.decode_malformed.load(Relaxed), 1);
+        assert_eq!(counters.decode_unsupported.load(Relaxed), 1);
+        assert_eq!(counters.policy_filtered.load(Relaxed), 1);
     }
 
     fn cap_at(frame: Vec<u8>, secs: u64) -> Captured {
@@ -188,25 +242,26 @@ mod tests {
     }
 
     async fn run(packets: Vec<Captured>, policy: EmitPolicy) -> Vec<EventoFluxoRede> {
+        run_counted(packets, policy).await.0
+    }
+
+    async fn run_counted(
+        packets: Vec<Captured>,
+        policy: EmitPolicy,
+    ) -> (Vec<EventoFluxoRede>, Arc<PipelineCounters>) {
+        let counters = Arc::new(PipelineCounters::default());
         let (ptx, prx) = mpsc::channel(packets.len().max(1));
         let (etx, mut erx) = mpsc::channel(packets.len().max(1));
         for p in packets {
             ptx.send(p).await.unwrap();
         }
         drop(ptx);
-        decode_loop(
-            prx,
-            etx,
-            policy,
-            true,
-            Arc::new(PipelineCounters::default()),
-        )
-        .await;
+        decode_loop(prx, etx, policy, true, counters.clone()).await;
         let mut out = Vec::new();
         while let Some(e) = erx.recv().await {
             out.push(e);
         }
-        out
+        (out, counters)
     }
 
     fn sni(e: &EventoFluxoRede) -> Option<&str> {
@@ -391,5 +446,80 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("encerrada"));
+    }
+    #[tokio::test]
+    async fn reassembly_discards_are_counted_once_per_flow() {
+        let h = client_hello_padded("quantum.example", 3000);
+        // lacuna: o 2o segmento nao comeca onde o 1o terminou
+        let (_, c) = run_counted(
+            vec![
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+                cap_at(seg_frame(3000, &h[1400..]), 10),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        assert_eq!(c.reassembly_discarded.load(Relaxed), 1);
+        // validade: o 2o segmento chega depois do TTL
+        let (_, c) = run_counted(
+            vec![
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+                cap_at(seg_frame(2400, &h[1400..]), 16),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        assert_eq!(c.reassembly_discarded.load(Relaxed), 1);
+        // registro completo: nada descartado
+        let (evs, c) = run_counted(
+            vec![
+                cap_at(seg_frame(1000, &h[..1400]), 10),
+                cap_at(seg_frame(2400, &h[1400..]), 10),
+            ],
+            EmitPolicy::Interesting,
+        )
+        .await;
+        assert_eq!(evs.len(), 1);
+        assert_eq!(c.reassembly_discarded.load(Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn non_initial_ip_fragments_are_counted_not_decoded() {
+        let mut ip = v4(17, &[0; 8]);
+        ip[6] = 0x00; // flags/offset: offset 0x10 = fragmento que nao e o primeiro
+        ip[7] = 0x10;
+        let (evs, c) = run_counted(vec![cap(eth(0x0800, &ip))], EmitPolicy::Interesting).await;
+        assert!(evs.is_empty());
+        assert_eq!(c.ip_fragments.load(Relaxed), 1);
+        assert_eq!(c.policy_filtered.load(Relaxed), 1);
+        assert_eq!(c.decode_malformed.load(Relaxed), 0);
+    }
+
+    #[test]
+    fn stats_keeps_each_loss_source_apart_and_sums_them() {
+        let (reconfig, _rx) = std::sync::mpsc::channel();
+        let ctl = SensorController {
+            paused: Arc::new(AtomicBool::new(false)),
+            capture: Arc::new(CaptureCounters::default()),
+            pipeline: Arc::new(PipelineCounters::default()),
+            reconfig,
+        };
+        ctl.capture.kernel_dropped.store(1, Relaxed);
+        ctl.capture.interface_dropped.store(2, Relaxed);
+        ctl.capture.channel_dropped.store(4, Relaxed);
+        ctl.pipeline.events_queue_dropped.store(8, Relaxed);
+        ctl.pipeline.decode_malformed.store(16, Relaxed);
+        let st = ctl.stats();
+        assert_eq!(
+            st.packets_dropped, 15,
+            "so perdas; erros de decode ficam de fora"
+        );
+        let get = |k: &str| st.counters.iter().find(|(n, _)| *n == k).map(|(_, v)| *v);
+        assert_eq!(get("perda.kernel"), Some(1));
+        assert_eq!(get("perda.interface"), Some(2));
+        assert_eq!(get("perda.fila_captura"), Some(4));
+        assert_eq!(get("perda.fila_eventos"), Some(8));
+        assert_eq!(get("decode.malformado"), Some(16));
+        assert_eq!(get("decode.nao_suportado"), Some(0));
     }
 }

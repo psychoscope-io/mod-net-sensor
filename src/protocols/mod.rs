@@ -60,8 +60,10 @@ pub enum Transport<'a> {
     },
     /// ICMP (v4) ou ICMPv6.
     Icmp { icmp_type: u8, code: u8 },
-    /// Outro protocolo de camada 4 (ou fragmento sem cabecalho L4).
+    /// Outro protocolo de camada 4.
     Other { proto: u8 },
+    /// Fragmento IP que nao e o primeiro: nao traz cabecalho L4 e o sensor nao remonta IP.
+    Fragment { proto: u8 },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -79,7 +81,7 @@ pub fn decode_frame(link: LinkType, frame: &[u8]) -> Result<Packet<'_>, DecodeEr
         _ => return Err(DecodeError::Unsupported),
     };
     let transport = if hdr.non_first_fragment {
-        Transport::Other { proto: hdr.proto }
+        Transport::Fragment { proto: hdr.proto }
     } else {
         decode_transport(hdr.proto, v6, hdr.payload)?
     };
@@ -232,7 +234,7 @@ mod tests {
         let f = eth(0x0800, &ip);
         assert_eq!(
             decode_frame(LinkType::Ethernet, &f).unwrap().transport,
-            Transport::Other { proto: 17 }
+            Transport::Fragment { proto: 17 }
         );
     }
 

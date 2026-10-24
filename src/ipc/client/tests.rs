@@ -30,6 +30,7 @@ impl Controller for MockCtl {
             packets_captured: 11,
             bytes: 2222,
             packets_dropped: 3,
+            counters: vec![("perda.kernel", 3), ("decode.malformado", 7)],
         }
     }
 }
@@ -172,6 +173,9 @@ async fn hello_telemetry_status_and_clean_shutdown() {
                     ),
                     (11, 2222, 3)
                 );
+                assert_eq!(s.contadores["perda.kernel"], 3);
+                assert_eq!(s.contadores["decode.malformado"], 7);
+                assert_eq!(s.contadores["perda.ipc"], 0, "sempre presente");
                 assert!(s.uso_memoria_mb > 0.0);
                 got_status = true;
             }

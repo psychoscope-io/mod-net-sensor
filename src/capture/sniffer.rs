@@ -61,10 +61,19 @@ pub struct CaptureCounters {
     pub captured: AtomicU64,
     /// Bytes (tamanho original na rede) dos pacotes lidos.
     pub bytes: AtomicU64,
-    /// Descartes do kernel/interface informados por `pcap_stats`.
+    /// Pacotes descartados pelo buffer do kernel (`ps_drop` do `pcap_stats`).
     pub kernel_dropped: AtomicU64,
+    /// Pacotes descartados pela interface (`ps_ifdrop` do `pcap_stats`).
+    pub interface_dropped: AtomicU64,
     /// Descartes por canal cheio (consumidor lento).
     pub channel_dropped: AtomicU64,
+}
+
+/// Descartes acumulados que o libpcap informa para a captura aberta.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct KernelStats {
+    dropped: u64,
+    if_dropped: u64,
 }
 
 pub struct ReconfigRequest {
@@ -147,9 +156,10 @@ fn spawn_live(cfg: &CaptureConfig, name: &str, ctx: Ctx) -> Result<CaptureThread
                 true,
                 ctx,
                 |c: &mut Capture<Active>| {
-                    c.stats()
-                        .ok()
-                        .map(|s| u64::from(s.dropped) + u64::from(s.if_dropped))
+                    c.stats().ok().map(|s| KernelStats {
+                        dropped: u64::from(s.dropped),
+                        if_dropped: u64::from(s.if_dropped),
+                    })
                 },
                 move || wait_readable(fd),
             )
@@ -199,10 +209,11 @@ fn run<T: Activated + ?Sized>(
     link: LinkType,
     live: bool,
     ctx: Ctx,
-    mut stats: impl FnMut(&mut Capture<T>) -> Option<u64>,
+    mut stats: impl FnMut(&mut Capture<T>) -> Option<KernelStats>,
     mut idle_wait: impl FnMut(),
 ) -> Result<(), CaptureError> {
     let mut last_stats = Instant::now();
+    let mut seen = KernelStats::default();
     while !ctx.stop.load(Relaxed) {
         apply_reconfig(&mut cap, live, &ctx);
         match cap.next_packet() {
@@ -217,10 +228,10 @@ fn run<T: Activated + ?Sized>(
         }
         if last_stats.elapsed() >= STATS_EVERY {
             last_stats = Instant::now();
-            record_kernel_drops(&ctx, stats(&mut cap));
+            record_kernel_drops(&ctx, &mut seen, stats(&mut cap));
         }
     }
-    record_kernel_drops(&ctx, stats(&mut cap));
+    record_kernel_drops(&ctx, &mut seen, stats(&mut cap));
     Ok(())
 }
 
@@ -275,10 +286,21 @@ fn forward(ctx: &Ctx, link: LinkType, live: bool, p: &pcap::Packet<'_>) -> Flow 
     }
 }
 
-fn record_kernel_drops(ctx: &Ctx, dropped: Option<u64>) {
-    if let Some(d) = dropped {
-        ctx.counters.kernel_dropped.store(d, Relaxed);
-    }
+/// Soma aos totais o que o kernel descartou desde a ultima leitura (`seen`). Se o valor
+/// informado regride (as estatisticas reiniciaram, por exemplo ao trocar o filtro), ele e
+/// tomado como novo ponto de partida em vez de ser descartado ou de apagar o total.
+fn record_kernel_drops(ctx: &Ctx, seen: &mut KernelStats, now: Option<KernelStats>) {
+    let Some(now) = now else { return };
+    let c = &ctx.counters;
+    c.kernel_dropped
+        .fetch_add(growth(now.dropped, seen.dropped), Relaxed);
+    c.interface_dropped
+        .fetch_add(growth(now.if_dropped, seen.if_dropped), Relaxed);
+    *seen = now;
+}
+
+fn growth(now: u64, seen: u64) -> u64 {
+    if now >= seen { now - seen } else { now }
 }
 
 #[cfg(test)]

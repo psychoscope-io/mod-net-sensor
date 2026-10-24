@@ -4,6 +4,7 @@
 //!
 //! Enquanto desconectado, os eventos recebidos sao descartados (e contados): a captura
 //! nunca fica retida esperando o Core.
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -287,6 +288,13 @@ impl<C: Controller> Client<C> {
 
     fn status(&self, cpu: &mut CpuMeter) -> MensagemIpc {
         let s = self.ctl.stats();
+        let ipc_dropped = self.counters.events_dropped.load(Relaxed);
+        let mut contadores: HashMap<String, u64> = s
+            .counters
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        contadores.insert("perda.ipc".to_string(), ipc_dropped);
         self.envelope(Payload::Status(StatusModulo {
             id_modulo: self.cfg.module_id.clone(),
             eventos_processados: self.counters.events_sent.load(Relaxed),
@@ -294,8 +302,8 @@ impl<C: Controller> Client<C> {
             uso_memoria_mb: rss_mb(),
             uso_cpu_percent: cpu.sample(),
             pacotes_capturados: s.packets_captured,
-            pacotes_descartados: s.packets_dropped,
-            contadores: Default::default(),
+            pacotes_descartados: s.packets_dropped + ipc_dropped,
+            contadores,
         }))
     }
 

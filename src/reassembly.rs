@@ -71,6 +71,8 @@ pub struct Reassembler {
     /// Do mais antigo ao mais novo: despejo e expiracao saem do inicio.
     by_age: BTreeMap<(Duration, u64), FlowKey>,
     serial: u64,
+    /// Fluxos descartados sem completar (lacuna, RST, truncamento, despejo ou validade).
+    discarded: u64,
 }
 
 /// Tamanho total do registro se `payload` abre um ClientHello que nao cabe nele.
@@ -97,6 +99,12 @@ impl Reassembler {
         self.flows.is_empty()
     }
 
+    /// Fluxos descartados sem completar desde a criacao: mede quantos ClientHellos
+    /// fragmentados o sensor deixou de analisar.
+    pub fn discarded(&self) -> u64 {
+        self.discarded
+    }
+
     /// Total de bytes retidos nos buffers.
     pub fn buffered_bytes(&self) -> usize {
         self.flows.values().map(|f| f.buf.len()).sum()
@@ -107,7 +115,7 @@ impl Reassembler {
         self.expire(now);
 
         if seg.flags & RST != 0 || seg.truncated {
-            self.remove(&key);
+            self.discard(&key);
             return Outcome::Passthrough;
         }
         if seg.payload.is_empty() {
@@ -120,7 +128,7 @@ impl Reassembler {
 
         if seg.seq != flow.next_seq {
             // lacuna, retransmissao ou sobreposicao: o fluxo nao e confiavel
-            self.remove(&key);
+            self.discard(&key);
             return Outcome::Passthrough;
         }
         let take = seg.payload.len().min(flow.total - flow.buf.len());
@@ -144,6 +152,7 @@ impl Reassembler {
                 break;
             };
             self.flows.remove(&oldest);
+            self.discarded += 1;
         }
         self.serial = self.serial.wrapping_add(1);
         let started = (now, self.serial);
@@ -158,6 +167,13 @@ impl Reassembler {
             },
         );
         Outcome::Pending
+    }
+
+    /// Remove o fluxo por ser inutilizavel e o conta como descartado (se existia).
+    fn discard(&mut self, key: &FlowKey) {
+        if self.remove(key).is_some() {
+            self.discarded += 1;
+        }
     }
 
     fn remove(&mut self, key: &FlowKey) -> Option<Flow> {
@@ -175,6 +191,7 @@ impl Reassembler {
             }
             let key = entry.remove();
             self.flows.remove(&key);
+            self.discarded += 1;
         }
     }
 }

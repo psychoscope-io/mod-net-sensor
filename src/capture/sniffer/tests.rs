@@ -188,3 +188,51 @@ fn timestamp_helper_clamps_garbage() {
         SystemTime::UNIX_EPOCH + Duration::new(1, 999_999_000)
     );
 }
+
+fn live_ctx() -> (Ctx, Arc<CaptureCounters>) {
+    let (tx, _rx) = mpsc::channel(1);
+    let (_rtx, rrx) = std::sync::mpsc::channel();
+    let counters = Arc::new(CaptureCounters::default());
+    let ctx = Ctx {
+        tx,
+        stop: Arc::new(AtomicBool::new(false)),
+        paused: Arc::new(AtomicBool::new(false)),
+        counters: counters.clone(),
+        reconfig: rrx,
+    };
+    (ctx, counters)
+}
+
+#[test]
+fn kernel_drops_accumulate_and_survive_a_counter_reset() {
+    let (ctx, counters) = live_ctx();
+    let mut seen = KernelStats::default();
+    let mut feed = |dropped, if_dropped| {
+        record_kernel_drops(
+            &ctx,
+            &mut seen,
+            Some(KernelStats {
+                dropped,
+                if_dropped,
+            }),
+        );
+        (
+            counters.kernel_dropped.load(Relaxed),
+            counters.interface_dropped.load(Relaxed),
+        )
+    };
+    assert_eq!(feed(5, 1), (5, 1));
+    assert_eq!(feed(8, 1), (8, 1), "so o acrescimo e somado");
+    assert_eq!(feed(8, 1), (8, 1), "sem mudanca, sem soma");
+    // as estatisticas reiniciaram (valor menor): o total nao regride e o novo valor conta
+    assert_eq!(feed(2, 0), (10, 1));
+    assert_eq!(feed(3, 4), (11, 5));
+}
+
+#[test]
+fn missing_kernel_stats_leave_the_totals_alone() {
+    let (ctx, counters) = live_ctx();
+    let mut seen = KernelStats::default();
+    record_kernel_drops(&ctx, &mut seen, None);
+    assert_eq!(counters.kernel_dropped.load(Relaxed), 0);
+}

@@ -85,7 +85,7 @@ pub fn build_event(
             payload,
         } => fill_udp(&mut ev, (*src_port, *dst_port), payload),
         Transport::Icmp { icmp_type, code } => fill_icmp(&mut ev, *icmp_type, *code),
-        Transport::Other { .. } => {
+        Transport::Other { .. } | Transport::Fragment { .. } => {
             ev.protocolo = ProtocoloTransporte::ProtoDesconhecido as i32;
             false
         }

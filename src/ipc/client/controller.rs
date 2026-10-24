@@ -4,12 +4,14 @@ use std::collections::HashMap;
 use std::future::Future;
 
 /// Numeros do pipeline reportados no `StatusModulo`.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct StatsSnapshot {
     pub packets_captured: u64,
     pub bytes: u64,
-    /// Pacotes perdidos em qualquer etapa (kernel, canal do sniffer).
+    /// Perdas das etapas do pipeline (kernel, interface, filas); o cliente soma as do IPC.
     pub packets_dropped: u64,
+    /// Contadores detalhados, cumulativos; as chaves estao documentadas em `ipc.proto`.
+    pub counters: Vec<(&'static str, u64)>,
 }
 
 /// Interface entre os comandos do Core e o resto do sensor.
