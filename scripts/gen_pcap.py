@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Gera um pcap sintetico (Ethernet) para o e2e e imprime o numero de eventos esperado
-com a politica 'interesting'. Uso: gen_pcap.py <saida.pcap>
+com a politica 'interesting'. Uso: gen_pcap.py <saida.pcap> [--repeat N] [--filler M]
+
+--repeat N repete o conjunto N vezes (instantes deslocados em 10000 s por copia) e --filler M
+acrescenta, por copia, M pacotes de dados TCP e UDP que a politica 'interesting' descarta:
+servem de carga para o benchmark (make bench). Sem opcoes, a saida e a do e2e.
 
 Trafego benigno + trafego malicioso que deve gerar EXATAMENTE 10 alertas:
   net.scan.syn x1, net.dns.nxdomain_burst x1, net.dns.tunnel x1, net.bruteforce.auth x1,
   net.icmp.sweep x1, net.beacon x1, net.dns.rate x1, net.tls.suspicious x3
   (SNI IP literal, versao TLS1.0 e SNI IP literal em ClientHello FRAGMENTADO em 2 segmentos TCP).
 """
-import random, socket, ssl, struct, sys
+import argparse, random, socket, ssl, struct
 
 def mac(n): return bytes([2, 0, 0, 0, 0, n])
 def eth(l3, ethertype, vlan=None):
@@ -113,10 +117,26 @@ for i in range(10):                            # beaconing: SYN a cada ~30 s (ji
 for i in range(220):                           # pico de DNS: 220 consultas em ~9 s de 10.0.0.60
     add(eth(ip4(17, udp(56000 + i, 53, dns_query("h%d.rate.example" % (i % 40))), "10.0.0.60", "10.0.0.2"), 0x0800), 1, at=500 + i * 0.04)
 
-packets.sort(key=lambda x: x[0])               # o motor espera eventos em ordem cronologica
-with open(sys.argv[1], "wb") as f:
+ap = argparse.ArgumentParser(description="Gera um pcap sintetico para o e2e e para o benchmark.")
+ap.add_argument("saida")
+ap.add_argument("--repeat", type=int, default=1, help="copias do conjunto de pacotes")
+ap.add_argument("--filler", type=int, default=0, help="pacotes descartados pela politica, por copia")
+args = ap.parse_args()
+
+COPY_SPAN = 10_000                             # segundos entre copias: cada copia fica depois da anterior
+all_packets = []
+for r in range(args.repeat):
+    all_packets += [(at + r * COPY_SPAN, p) for at, p in packets]
+    for j in range(args.filler):               # dados TCP e UDP generico, de hosts distintos
+        src = "10.1.%d.%d" % (j // 250 % 250, j % 250 + 1)
+        body = (b"x" * 100) if j % 2 else (b"y" * 400)
+        l4 = tcp(30000 + j % 1000, 8080, PSH | ACK, body) if j % 3 else udp(30000 + j % 1000, 9999, body)
+        all_packets.append((r * COPY_SPAN + j * 0.001, eth(ip4(6 if j % 3 else 17, l4, src, "10.0.0.2"), 0x0800)))
+
+all_packets.sort(key=lambda x: x[0])           # o motor espera eventos em ordem cronologica
+with open(args.saida, "wb") as f:
     f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1))
-    for at, p in packets:
+    for at, p in all_packets:
         t = T0 * 1_000_000 + int(round(at * 1_000_000))
         f.write(struct.pack("<IIII", t // 1_000_000, t % 1_000_000, len(p), len(p)) + p)
-print(expected)
+print(expected * args.repeat)
