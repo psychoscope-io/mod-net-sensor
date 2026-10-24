@@ -57,6 +57,9 @@ fn dns_over_tcp(payload: &[u8]) -> Option<DnsInfo> {
 
 /// Monta o evento para `pkt`, ou `None` se a politica o descarta.
 /// `wire_len` e o tamanho original do pacote na rede (nao o capturado).
+///
+/// Os campos de camada 4 e L7 sao preenchidos primeiro, porque dizem se o pacote interessa; os
+/// enderecos (texto, uma alocacao cada) so sao montados para quem vira evento.
 pub fn build_event(
     pkt: &Packet<'_>,
     ts: SystemTime,
@@ -65,10 +68,7 @@ pub fn build_event(
 ) -> Option<EventoFluxoRede> {
     let all = policy == EmitPolicy::All;
     let mut ev = EventoFluxoRede {
-        ip_origem: pkt.src_ip.to_string(),
-        ip_destino: pkt.dst_ip.to_string(),
         tamanho_bytes: wire_len,
-        timestamp_captura: Some(to_timestamp(ts)),
         ..Default::default()
     };
     let keep = match &pkt.transport {
@@ -90,7 +90,13 @@ pub fn build_event(
             false
         }
     };
-    (all || keep).then_some(ev)
+    if !(all || keep) {
+        return None;
+    }
+    ev.ip_origem = pkt.src_ip.to_string();
+    ev.ip_destino = pkt.dst_ip.to_string();
+    ev.timestamp_captura = Some(to_timestamp(ts));
+    Some(ev)
 }
 
 fn is_dns_port((src, dst): (u16, u16)) -> bool {
