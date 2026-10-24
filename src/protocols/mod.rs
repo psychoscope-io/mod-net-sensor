@@ -28,16 +28,36 @@ pub enum DecodeError {
 pub enum LinkType {
     Ethernet,
     LinuxSll,
+    /// Linux cooked v2 (DLT_LINUX_SLL2 = 276), o padrao do libpcap recente em `-i any`.
+    LinuxSll2,
     /// IP puro (DLT_RAW = 12/101): versao decidida pelo primeiro nibble.
     Raw,
+    /// Loopback BSD (DLT_NULL = 0, DLT_LOOP = 108): 4 bytes de familia (a ordem dos bytes
+    /// depende de quem capturou) e o pacote IP, com a versao decidida pelo primeiro nibble.
+    Loopback,
 }
+
+/// Todos os tipos de enlace, para os testes de propriedade e o fuzz percorrerem cada um.
+pub const ALL_LINKS: [LinkType; 5] = [
+    LinkType::Ethernet,
+    LinkType::LinuxSll,
+    LinkType::LinuxSll2,
+    LinkType::Raw,
+    LinkType::Loopback,
+];
+
+/// Tipos de enlace aceitos, para a mensagem de erro de quem abre uma fonte nao suportada.
+pub const SUPPORTED_DLT: &str =
+    "Ethernet (1), Linux cooked v1 e v2 (113, 276), loopback BSD (0, 108) e IP puro (12, 101)";
 
 impl LinkType {
     pub fn from_dlt(dlt: i32) -> Option<Self> {
         match dlt {
             1 => Some(Self::Ethernet),
             113 => Some(Self::LinuxSll),
+            276 => Some(Self::LinuxSll2),
             12 | 101 => Some(Self::Raw),
+            0 | 108 => Some(Self::Loopback),
             _ => None,
         }
     }
@@ -97,12 +117,19 @@ fn link_payload(link: LinkType, frame: &[u8]) -> Result<(u16, &[u8]), DecodeErro
     match link {
         LinkType::Ethernet => ethernet::parse_ethernet(frame),
         LinkType::LinuxSll => ethernet::parse_linux_sll(frame),
-        LinkType::Raw => match frame.first().map(|b| b >> 4) {
-            Some(4) => Ok((ethernet::ETHERTYPE_IPV4, frame)),
-            Some(6) => Ok((ethernet::ETHERTYPE_IPV6, frame)),
-            Some(_) => Err(DecodeError::Malformed),
-            None => Err(DecodeError::Truncated),
-        },
+        LinkType::LinuxSll2 => ethernet::parse_linux_sll2(frame),
+        LinkType::Raw => ip_by_version(frame),
+        LinkType::Loopback => ip_by_version(frame.get(4..).ok_or(DecodeError::Truncated)?),
+    }
+}
+
+/// Pacote IP sem cabecalho de enlace: a versao (IPv4 ou IPv6) vem do primeiro nibble.
+fn ip_by_version(packet: &[u8]) -> Result<(u16, &[u8]), DecodeError> {
+    match packet.first().map(|b| b >> 4) {
+        Some(4) => Ok((ethernet::ETHERTYPE_IPV4, packet)),
+        Some(6) => Ok((ethernet::ETHERTYPE_IPV6, packet)),
+        Some(_) => Err(DecodeError::Malformed),
+        None => Err(DecodeError::Truncated),
     }
 }
 
@@ -228,6 +255,63 @@ mod tests {
     }
 
     #[test]
+    fn sll2_and_loopback_frames_decode_like_the_others() {
+        let ip = v4(17, &udp(1, 53, &dns_query("a.com", 1)));
+        let ip6 = v6(17, &udp(1, 53, &dns_query("a.com", 1)));
+
+        let mut sll2 = vec![0x08, 0x00];
+        sll2.extend([0; 18]);
+        sll2.extend(&ip);
+        let p = decode_frame(LinkType::LinuxSll2, &sll2).unwrap();
+        assert!(matches!(p.transport, Transport::Udp { dst_port: 53, .. }));
+
+        // BSD loopback: 4 bytes de familia (ordem do host que capturou, aqui as duas) + IP
+        for family in [[2, 0, 0, 0], [0, 0, 0, 2]] {
+            let mut f = family.to_vec();
+            f.extend(&ip);
+            assert!(decode_frame(LinkType::Loopback, &f).is_ok());
+        }
+        let mut f = vec![0, 0, 0, 24];
+        f.extend(&ip6);
+        assert!(
+            decode_frame(LinkType::Loopback, &f)
+                .unwrap()
+                .src_ip
+                .is_ipv6()
+        );
+
+        // truncado: sem a familia, ou so com ela
+        assert_eq!(
+            decode_frame(LinkType::Loopback, &[0, 0]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            decode_frame(LinkType::Loopback, &[0, 0, 0, 2]),
+            Err(DecodeError::Truncated)
+        );
+        assert_eq!(
+            decode_frame(LinkType::LinuxSll2, &sll2[..19]),
+            Err(DecodeError::Truncated)
+        );
+        // versao IP invalida depois da familia
+        assert_eq!(
+            decode_frame(LinkType::Loopback, &[0, 0, 0, 2, 0x10]),
+            Err(DecodeError::Malformed)
+        );
+
+        for (dlt, link) in [
+            (0, LinkType::Loopback),
+            (108, LinkType::Loopback),
+            (276, LinkType::LinuxSll2),
+            (113, LinkType::LinuxSll),
+            (12, LinkType::Raw),
+            (101, LinkType::Raw),
+        ] {
+            assert_eq!(LinkType::from_dlt(dlt), Some(link), "DLT {dlt}");
+        }
+    }
+
+    #[test]
     fn fragments_do_not_expose_l4() {
         let mut ip = v4(17, &udp(1, 2, b"x"));
         ip[6..8].copy_from_slice(&0x0010u16.to_be_bytes());
@@ -247,7 +331,7 @@ mod tests {
 
             #[test]
             fn arbitrary_bytes_never_panic(data in proptest::collection::vec(any::<u8>(), 0..400)) {
-                for link in [LinkType::Ethernet, LinkType::LinuxSll, LinkType::Raw] {
+                for link in ALL_LINKS {
                     let _ = decode_frame(link, &data);
                 }
                 let _ = dns::parse_dns(&data);

@@ -1,4 +1,4 @@
-//! Camada 2: Ethernet II (com ate 2 tags VLAN 802.1Q/802.1ad) e Linux cooked (SLL).
+//! Camada 2: Ethernet II (com ate 2 tags VLAN 802.1Q/802.1ad) e Linux cooked (SLL v1 e v2).
 use super::DecodeError;
 use super::reader::Reader;
 
@@ -29,6 +29,17 @@ pub fn parse_linux_sll(frame: &[u8]) -> Result<(u16, &[u8]), DecodeError> {
     let mut r = Reader::new(frame);
     r.skip(14).ok_or(DecodeError::Truncated)?; // tipo, ARPHRD, tam. endereco, endereco(8)
     let ethertype = r.u16().ok_or(DecodeError::Truncated)?;
+    Ok((ethertype, r.rest()))
+}
+
+/// Devolve `(ethertype, payload)` de um frame Linux cooked capture v2 (DLT_LINUX_SLL2), o
+/// formato que o libpcap recente usa por padrao em `-i any`. O protocolo vem primeiro, e o
+/// cabecalho tem 20 bytes: protocolo(2), reservado(2), indice da interface(4), ARPHRD(2),
+/// tipo do pacote(1), tam. endereco(1) e endereco(8).
+pub fn parse_linux_sll2(frame: &[u8]) -> Result<(u16, &[u8]), DecodeError> {
+    let mut r = Reader::new(frame);
+    let ethertype = r.u16().ok_or(DecodeError::Truncated)?;
+    r.skip(18).ok_or(DecodeError::Truncated)?;
     Ok((ethertype, r.rest()))
 }
 
@@ -87,5 +98,23 @@ mod tests {
             parse_linux_sll(&f).unwrap(),
             (ETHERTYPE_IPV4, &[5u8, 6][..])
         );
+    }
+
+    #[test]
+    fn sll2() {
+        let mut f = vec![0x86, 0xdd];
+        f.extend([0; 18]);
+        f.extend([7, 8]);
+        assert_eq!(
+            parse_linux_sll2(&f).unwrap(),
+            (ETHERTYPE_IPV6, &[7u8, 8][..])
+        );
+        // sem payload e valido (cabecalho completo); truncar o cabecalho nao
+        assert_eq!(parse_linux_sll2(&f[..20]).unwrap().1, &[] as &[u8]);
+        assert!(matches!(
+            parse_linux_sll2(&f[..19]),
+            Err(DecodeError::Truncated)
+        ));
+        assert!(matches!(parse_linux_sll2(&[]), Err(DecodeError::Truncated)));
     }
 }

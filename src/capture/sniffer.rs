@@ -39,7 +39,10 @@ pub struct CaptureConfig {
 pub enum CaptureError {
     #[error("pcap: {0}")]
     Pcap(#[from] PcapError),
-    #[error("tipo de enlace nao suportado (DLT {0})")]
+    #[error(
+        "tipo de enlace nao suportado (DLT {0}); aceitos: {supported}",
+        supported = crate::protocols::SUPPORTED_DLT
+    )]
     UnsupportedLink(i32),
     #[error("falha ao iniciar a thread de captura: {0}")]
     Thread(std::io::Error),

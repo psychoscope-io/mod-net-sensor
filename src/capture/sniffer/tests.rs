@@ -236,3 +236,45 @@ fn missing_kernel_stats_leave_the_totals_alone() {
     record_kernel_drops(&ctx, &mut seen, None);
     assert_eq!(counters.kernel_dropped.load(Relaxed), 0);
 }
+
+#[test]
+fn replays_every_supported_link_type_and_names_the_accepted_ones_otherwise() {
+    let dir = tempfile_dir::Dir::new("links");
+    let ip = v4(17, &udp(5000, 53, &dns_query("a.com", 1)));
+    for (dlt, link) in [
+        (0, LinkType::Loopback),
+        (108, LinkType::Loopback),
+        (276, LinkType::LinuxSll2),
+        (113, LinkType::LinuxSll),
+        (101, LinkType::Raw),
+    ] {
+        let path = fixture(
+            &dir,
+            dlt,
+            &[PcapPacket {
+                ts_sec: 1,
+                ts_usec: 0,
+                data: &ip,
+                wire_len: None,
+            }],
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let h = spawn(&cfg(path, None), tx).unwrap();
+        h.join.join().unwrap().unwrap();
+        let got = drain(rx);
+        assert_eq!(got.len(), 1, "DLT {dlt}");
+        assert_eq!(got[0].link, link, "DLT {dlt}");
+    }
+
+    // DLT 147 (uso privado) nao e decodificavel: o erro diz o que e aceito
+    let path = fixture(&dir, 147, &[]);
+    let (tx, _rx) = mpsc::channel(8);
+    let Err(e) = spawn(&cfg(path, None), tx) else {
+        panic!("DLT 147 deveria ser recusado")
+    };
+    let msg = e.to_string();
+    assert!(
+        msg.contains("DLT 147") && msg.contains("276") && msg.contains("loopback BSD"),
+        "{msg}"
+    );
+}
