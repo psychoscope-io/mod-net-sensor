@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use pcap::{Activated, Active, Capture, Error as PcapError};
+use pcap::{Activated, Active, Capture, Error as PcapError, Offline};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocols::LinkType;
@@ -135,19 +135,49 @@ pub fn spawn(
 
 type CaptureThread = JoinHandle<Result<(), CaptureError>>;
 
-/// Abre a interface em modo nao bloqueante e inicia a thread de captura ao vivo.
-fn spawn_live(cfg: &CaptureConfig, name: &str, ctx: Ctx) -> Result<CaptureThread, CaptureError> {
+/// Abre a interface (permissao, buffer do kernel, filtro BPF) sem iniciar a leitura.
+fn open_live(cfg: &CaptureConfig, name: &str) -> Result<Capture<Active>, CaptureError> {
     let mut cap = Capture::from_device(name)?
         .promisc(cfg.promisc)
         .snaplen(cfg.snaplen)
         .timeout(READ_TIMEOUT_MS)
         .immediate_mode(true)
         .buffer_size(KERNEL_BUFFER_BYTES)
-        .open()?
-        .setnonblock()?; // com immediate_mode o timeout do libpcap pode nao valer: espera via poll(2)
+        .open()?;
     if let Some(f) = &cfg.bpf {
         cap.filter(f, true)?;
     }
+    Ok(cap)
+}
+
+/// Abre o arquivo pcap (e o filtro BPF) sem iniciar a leitura.
+fn open_file(cfg: &CaptureConfig, path: &Path) -> Result<Capture<Offline>, CaptureError> {
+    let mut cap = Capture::from_file(path)?;
+    if let Some(f) = &cfg.bpf {
+        cap.filter(f, true)?;
+    }
+    Ok(cap)
+}
+
+/// Confere se a fonte abre como `spawn` abriria (interface, permissao, arquivo, filtro BPF e
+/// tipo de enlace) e a fecha em seguida, sem capturar nada. Para `--check`.
+pub fn probe(cfg: &CaptureConfig) -> Result<LinkType, CaptureError> {
+    match &cfg.source {
+        Source::Interface(name) => link_of(&open_live(cfg, name)?),
+        Source::File(path) => link_of(&open_file(cfg, path)?),
+    }
+}
+
+/// Valida a sintaxe de um filtro BPF sem abrir interface alguma (nao exige permissao).
+pub fn check_bpf(expr: &str) -> Result<(), CaptureError> {
+    Capture::dead(pcap::Linktype::ETHERNET)?.compile(expr, true)?;
+    Ok(())
+}
+
+/// Abre a interface em modo nao bloqueante e inicia a thread de captura ao vivo.
+fn spawn_live(cfg: &CaptureConfig, name: &str, ctx: Ctx) -> Result<CaptureThread, CaptureError> {
+    // com immediate_mode o timeout do libpcap pode nao valer: espera via poll(2)
+    let cap = open_live(cfg, name)?.setnonblock()?;
     let link = link_of(&cap)?;
     let fd = cap.as_raw_fd();
     std::thread::Builder::new()
@@ -172,10 +202,7 @@ fn spawn_live(cfg: &CaptureConfig, name: &str, ctx: Ctx) -> Result<CaptureThread
 
 /// Abre o arquivo pcap e inicia a thread de leitura (sem perdas, sem estatisticas do kernel).
 fn spawn_file(cfg: &CaptureConfig, path: &Path, ctx: Ctx) -> Result<CaptureThread, CaptureError> {
-    let mut cap = Capture::from_file(path)?;
-    if let Some(f) = &cfg.bpf {
-        cap.filter(f, true)?;
-    }
+    let cap = open_file(cfg, path)?;
     let link = link_of(&cap)?;
     std::thread::Builder::new()
         .name("pcap-file".into())

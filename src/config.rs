@@ -1,12 +1,21 @@
 //! Parsing de flags CLI (e variaveis de ambiente injetadas pelo supervisor do Core).
 use std::path::PathBuf;
 
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, ValueEnum};
 
 use crate::event::EmitPolicy;
 
 /// Teto da memoria que a fila de pacotes pode reter no pior caso (`queue_size * snaplen`).
 pub const MAX_QUEUE_BYTES: u64 = 256 << 20;
+
+/// Formato de `--print`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PrintFormat {
+    /// Uma linha de texto por evento.
+    Text,
+    /// Um objeto JSON por linha.
+    Json,
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -14,7 +23,7 @@ pub const MAX_QUEUE_BYTES: u64 = 256 << 20;
     version,
     about = "Sensor de rede do Psychoscope (captura -> decode -> IPC)"
 )]
-#[command(group(ArgGroup::new("source").required(true).args(["interface", "pcap_file"])))]
+#[command(group(ArgGroup::new("source").args(["interface", "pcap_file"])))]
 pub struct Config {
     /// Socket do core (o supervisor define PSYCHOSCOPE_SOCKET).
     #[arg(
@@ -59,6 +68,24 @@ pub struct Config {
     /// Com --pcap-file: encerra apos enviar todos os eventos (em vez de ficar ocioso).
     #[arg(long)]
     pub exit_on_eof: bool,
+
+    /// Lista as interfaces de rede capturaveis e sai.
+    #[arg(long)]
+    pub list_interfaces: bool,
+
+    /// Confere o ambiente (fonte, permissao de captura, filtro BPF, socket do Core), diz o que
+    /// corrigir e sai com 1 se algo falhar. Nao envia eventos.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Imprime os eventos no terminal em vez de envia-los ao Core (nao precisa do Core).
+    /// Formato: text (padrao) ou json.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "text", value_name = "FORMATO")]
+    pub print: Option<PrintFormat>,
+
+    /// Mostra um resumo periodico (pacotes/s, perdas, eventos) no stderr.
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 impl Config {
@@ -69,6 +96,24 @@ impl Config {
         T: Into<std::ffi::OsString> + Clone,
     {
         let cfg = Self::try_parse_from(args)?;
+        if cfg.list_interfaces {
+            let others = cfg.interface.is_some()
+                || cfg.pcap_file.is_some()
+                || cfg.check
+                || cfg.print.is_some();
+            return if others {
+                Err(Self::usage_error(
+                    "--list-interfaces so pode ser usado sozinho",
+                ))
+            } else {
+                Ok(cfg)
+            };
+        }
+        if cfg.interface.is_none() && cfg.pcap_file.is_none() {
+            return Err(Self::usage_error(
+                "informe a fonte: -i <interface> ou --pcap-file <arquivo> (as interfaces disponiveis aparecem com --list-interfaces)",
+            ));
+        }
         if cfg.exit_on_eof && cfg.pcap_file.is_none() {
             return Err(<Self as clap::CommandFactory>::command().error(
                 clap::error::ErrorKind::ArgumentConflict,
@@ -91,6 +136,11 @@ impl Config {
             ));
         }
         Ok(cfg)
+    }
+
+    fn usage_error(msg: &str) -> clap::Error {
+        <Self as clap::CommandFactory>::command()
+            .error(clap::error::ErrorKind::MissingRequiredArgument, msg)
     }
 
     /// Como `try_parse_checked` sobre `std::env::args`, encerrando o processo em caso de erro.
@@ -139,5 +189,43 @@ mod tests {
         assert!(parse(&["--pcap-file", "x", "--queue-size", "1000000"]).is_err());
         // o padrao cabe com folga
         assert!(parse(&["-i", "lo"]).is_ok());
+    }
+
+    #[test]
+    fn list_interfaces_stands_alone_and_other_modes_still_need_a_source() {
+        let c = parse(&["--list-interfaces"]).unwrap();
+        assert!(c.list_interfaces && c.interface.is_none());
+        assert!(parse(&["--list-interfaces", "-i", "eth0"]).is_err());
+        assert!(parse(&["--list-interfaces", "--check"]).is_err());
+        // sem fonte, o erro diz o que fazer e onde ver as interfaces
+        let msg = parse(&[]).unwrap_err().to_string();
+        assert!(
+            msg.contains("informe a fonte") && msg.contains("--list-interfaces"),
+            "{msg}"
+        );
+        assert!(
+            parse(&["--check"]).is_err(),
+            "--check precisa da fonte a conferir"
+        );
+        assert!(parse(&["--check", "-i", "eth0"]).is_ok());
+    }
+
+    #[test]
+    fn print_takes_an_optional_format() {
+        assert_eq!(parse(&["-i", "lo"]).unwrap().print, None);
+        assert_eq!(
+            parse(&["-i", "lo", "--print"]).unwrap().print,
+            Some(PrintFormat::Text)
+        );
+        assert_eq!(
+            parse(&["-i", "lo", "--print=json"]).unwrap().print,
+            Some(PrintFormat::Json)
+        );
+        assert_eq!(
+            parse(&["-i", "lo", "--print", "text"]).unwrap().print,
+            Some(PrintFormat::Text)
+        );
+        assert!(parse(&["-i", "lo", "--print=xml"]).is_err());
+        assert!(parse(&["-i", "lo", "-v"]).unwrap().verbose);
     }
 }

@@ -278,3 +278,40 @@ fn replays_every_supported_link_type_and_names_the_accepted_ones_otherwise() {
         "{msg}"
     );
 }
+
+#[test]
+fn check_bpf_validates_syntax_without_opening_anything() {
+    assert!(check_bpf("udp port 53 or tcp port 443").is_ok());
+    assert!(check_bpf("").is_ok(), "sem filtro e valido");
+    let e = check_bpf("udp port").unwrap_err().to_string();
+    assert!(
+        e.to_lowercase().contains("syntax error") || e.contains("filter"),
+        "{e}"
+    );
+}
+
+#[test]
+fn probe_opens_a_file_source_like_spawn_and_reports_what_is_wrong() {
+    let dir = tempfile_dir::Dir::new("probe");
+    let ip = v4(17, &udp(5000, 53, &dns_query("a.com", 1)));
+    let path = fixture(
+        &dir,
+        LINKTYPE_ETHERNET,
+        &[PcapPacket {
+            ts_sec: 1,
+            ts_usec: 0,
+            data: &ip,
+            wire_len: None,
+        }],
+    );
+    assert_eq!(probe(&cfg(path.clone(), None)).unwrap(), LinkType::Ethernet);
+    assert!(
+        probe(&cfg(path, Some("udp port"))).is_err(),
+        "filtro invalido"
+    );
+    let missing = dir.path.join("nao-existe.pcap");
+    assert!(probe(&cfg(missing, None)).is_err());
+    let garbage = dir.path.join("lixo.pcap");
+    std::fs::write(&garbage, b"isto nao e um pcap").unwrap();
+    assert!(probe(&cfg(garbage, None)).is_err());
+}
