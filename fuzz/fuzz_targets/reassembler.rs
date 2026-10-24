@@ -12,7 +12,7 @@ use std::time::Duration;
 use libfuzzer_sys::fuzz_target;
 use mod_net_sensor::protocols::tcp::RST;
 use mod_net_sensor::reassembly::{
-    FlowKey, MAX_FLOWS, MAX_RECORD_BYTES, Outcome, Reassembler, Segment,
+    FlowKey, MAX_FLOWS, MAX_FLOWS_PER_SOURCE, MAX_RECORD_BYTES, Outcome, Reassembler, Segment,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -40,9 +40,10 @@ fuzz_target!(|data: &[u8]| {
         let seq = expected.wrapping_add(i32::from(*adj as i8) as u32);
         *expected = seq.wrapping_add(payload.len() as u32);
 
+        // a origem vem do 1o byte do fluxo (poucas origens), a porta do 2o: o fuzzer chega a cota
         let key = FlowKey {
-            src_ip: [10, 0, *f0, *f1].into(),
-            src_port: 40000,
+            src_ip: [10, 0, 0, *f0].into(),
+            src_port: 40000 + u16::from(*f1),
             dst_ip: [10, 9, 9, 9].into(),
             dst_port: 443,
         };
@@ -57,6 +58,7 @@ fuzz_target!(|data: &[u8]| {
             assert!(rec.starts_with(&[0x16, 0x03]));
         }
         assert!(r.len() <= MAX_FLOWS);
+        assert!(r.flows_from(key.src_ip) <= MAX_FLOWS_PER_SOURCE);
         assert!(r.buffered_bytes() <= r.len() * MAX_RECORD_BYTES);
     }
 });

@@ -128,6 +128,7 @@ fn bench_decode_loop(c: &mut Criterion) {
     let frames = load_frames();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        .enable_time()
         .build()
         .expect("runtime do benchmark");
     let mut g = c.benchmark_group("decode_loop");

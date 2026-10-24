@@ -2,15 +2,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::time::{Duration, SystemTime};
 
 use psychoscope_proto::v1::EventoFluxoRede;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{MissedTickBehavior, interval};
 
 use crate::capture::sniffer::{CaptureCounters, Captured, ReconfigRequest};
 use crate::event::{EmitPolicy, build_event_reassembling};
 use crate::ipc::client::{Controller, StatsSnapshot};
 use crate::protocols::{DecodeError, Transport, decode_frame};
 use crate::reassembly::Reassembler;
+
+/// De quanto em quanto tempo, ao vivo, a remontagem expira fluxos sem novos pacotes.
+const IDLE_EXPIRE_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Default, Debug)]
 pub struct PipelineCounters {
@@ -72,6 +77,12 @@ impl Decoder {
         ev
     }
 
+    /// Expira fluxos ociosos da remontagem; `now` e o relogio desde a epoca Unix.
+    fn expire_idle(&mut self, now: Duration) {
+        self.reasm.expire(now);
+        self.publish_reassembly_discards();
+    }
+
     fn publish_reassembly_discards(&mut self) {
         let total = self.reasm.discarded();
         if total != self.reasm_published {
@@ -83,8 +94,30 @@ impl Decoder {
     }
 }
 
+/// Entrega o evento ao canal. `false` quando o consumidor fechou o canal.
+/// `lossless` espera espaco; senao, canal cheio descarta e conta.
+async fn deliver(
+    tx: &mpsc::Sender<EventoFluxoRede>,
+    ev: EventoFluxoRede,
+    lossless: bool,
+    counters: &PipelineCounters,
+) -> bool {
+    if lossless {
+        return tx.send(ev).await.is_ok();
+    }
+    match tx.try_send(ev) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            counters.events_queue_dropped.fetch_add(1, Relaxed);
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 /// Consome pacotes brutos, decodifica e emite eventos. Termina quando a captura fecha o canal.
-/// `lossless` (leitura de arquivo) espera espaco em vez de descartar.
+/// `lossless` (leitura de arquivo) espera espaco em vez de descartar. Ao vivo, a remontagem
+/// tambem expira fluxos ociosos pelo relogio do sistema, para liberar memoria sem trafego.
 pub async fn decode_loop(
     mut rx: mpsc::Receiver<Captured>,
     tx: mpsc::Sender<EventoFluxoRede>,
@@ -98,24 +131,24 @@ pub async fn decode_loop(
         policy,
         counters: counters.clone(),
     };
-    while let Some(p) = rx.recv().await {
-        let Some(ev) = decoder.handle(&p) else {
-            continue;
-        };
-        let delivered = if lossless {
-            tx.send(ev).await.is_ok()
-        } else {
-            match tx.try_send(ev) {
-                Ok(()) => true,
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    counters.events_queue_dropped.fetch_add(1, Relaxed);
-                    true
+    let mut idle = interval(IDLE_EXPIRE_EVERY);
+    idle.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            p = rx.recv() => {
+                let Some(p) = p else { break };
+                let Some(ev) = decoder.handle(&p) else { continue };
+                if !deliver(&tx, ev, lossless, &counters).await {
+                    break;
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => false,
             }
-        };
-        if !delivered {
-            break;
+            _ = idle.tick(), if !lossless => {
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default();
+                decoder.expire_idle(now);
+            }
         }
     }
 }
@@ -521,5 +554,23 @@ mod tests {
         assert_eq!(get("perda.fila_eventos"), Some(8));
         assert_eq!(get("decode.malformado"), Some(16));
         assert_eq!(get("decode.nao_suportado"), Some(0));
+    }
+    #[test]
+    fn idle_expiry_publishes_the_discarded_flow() {
+        let h = client_hello_padded("idle.example", 3000);
+        let counters = Arc::new(PipelineCounters::default());
+        let mut d = Decoder {
+            reasm: Reassembler::new(),
+            reasm_published: 0,
+            policy: EmitPolicy::Interesting,
+            counters: counters.clone(),
+        };
+        assert!(d.handle(&cap_at(seg_frame(1000, &h[..1400]), 10)).is_none());
+        d.expire_idle(Duration::from_secs(12)); // dentro do TTL (5 s)
+        assert_eq!(counters.reassembly_discarded.load(Relaxed), 0);
+        d.expire_idle(Duration::from_secs(16));
+        assert_eq!(counters.reassembly_discarded.load(Relaxed), 1);
+        d.expire_idle(Duration::from_secs(60)); // sem o que expirar: nao conta de novo
+        assert_eq!(counters.reassembly_discarded.load(Relaxed), 1);
     }
 }

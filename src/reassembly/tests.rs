@@ -349,3 +349,76 @@ mod prop {
         }
     }
 }
+
+fn key_from(src: [u8; 4], port: u16) -> FlowKey {
+    FlowKey {
+        src_ip: IpAddr::from(src),
+        src_port: port,
+        dst_ip: "10.0.0.2".parse().unwrap(),
+        dst_port: 443,
+    }
+}
+
+#[test]
+fn one_source_cannot_take_the_whole_table() {
+    let h = big_hello("hog.example");
+    let mut r = Reassembler::new();
+    let hog = [10, 6, 6, 6];
+    for port in 0..MAX_FLOWS_PER_SOURCE as u16 {
+        let k = key_from(hog, 1000 + port);
+        assert_eq!(r.feed(secs(0), k, seg(1, &h[..1400])), Outcome::Pending);
+    }
+    assert_eq!(r.flows_from(hog.into()), MAX_FLOWS_PER_SOURCE);
+    // a cota estourou: o excedente nao entra, e nada de outra origem e despejado
+    let victim = key_from([10, 7, 7, 7], 5000);
+    assert_eq!(
+        r.feed(secs(0), victim, seg(1, &h[..1400])),
+        Outcome::Pending
+    );
+    let extra = key_from(hog, 9000);
+    assert_eq!(
+        r.feed(secs(0), extra, seg(1, &h[..1400])),
+        Outcome::Passthrough
+    );
+    assert_eq!(r.flows_from(hog.into()), MAX_FLOWS_PER_SOURCE);
+    assert_eq!(r.discarded(), 1);
+    assert_eq!(
+        r.feed(secs(0), victim, seg(1401, &h[1400..])),
+        Outcome::Complete(h),
+        "o fluxo da outra origem sobreviveu"
+    );
+}
+
+#[test]
+fn source_quota_is_released_when_flows_end() {
+    let h = big_hello("quota.example");
+    let mut r = Reassembler::new();
+    let src = [10, 8, 8, 8];
+    for port in 0..MAX_FLOWS_PER_SOURCE as u16 {
+        r.feed(secs(0), key_from(src, port), seg(1, &h[..1400]));
+    }
+    // completar um fluxo, descartar outro por lacuna e expirar o resto devolvem a cota
+    assert!(matches!(
+        r.feed(secs(0), key_from(src, 0), seg(1401, &h[1400..])),
+        Outcome::Complete(_)
+    ));
+    assert_eq!(r.flows_from(src.into()), MAX_FLOWS_PER_SOURCE - 1);
+    r.feed(secs(0), key_from(src, 1), seg(5000, &h[1400..]));
+    assert_eq!(r.flows_from(src.into()), MAX_FLOWS_PER_SOURCE - 2);
+    r.expire(secs(60));
+    assert_eq!(r.flows_from(src.into()), 0);
+    assert!(r.is_empty() && r.buffered_bytes() == 0);
+}
+
+#[test]
+fn idle_expiry_frees_memory_without_new_traffic() {
+    let h = big_hello("idle.example");
+    let mut r = Reassembler::new();
+    r.feed(secs(100), key(0), seg(1, &h[..1400]));
+    r.expire(secs(105));
+    assert_eq!(r.len(), 1, "dentro do TTL");
+    r.expire(secs(106));
+    assert!(r.is_empty());
+    assert_eq!(r.discarded(), 1);
+    r.expire(secs(0)); // relogio para tras: nada acontece
+}

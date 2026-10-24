@@ -8,7 +8,8 @@
 //! Politica estrita (o sensor e passivo e nao ve o mesmo que o receptor): so aceita o segmento
 //! com o `seq` esperado; lacuna, retransmissao, sobreposicao, RST ou captura truncada
 //! descartam o fluxo. Limites: `MAX_RECORD_BYTES` por fluxo, `MAX_FLOWS` fluxos (despeja o
-//! mais antigo) e `TTL` medido no tempo dos pacotes, nao no relogio do sistema.
+//! mais antigo), `MAX_FLOWS_PER_SOURCE` por IP de origem (um host nao esvazia a tabela dos
+//! demais) e `TTL` medido no tempo dos pacotes, nao no relogio do sistema.
 //! Sem `unsafe`; nenhuma entrada causa panico.
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
@@ -20,6 +21,8 @@ use crate::protocols::tcp::RST;
 pub const MAX_RECORD_BYTES: usize = 18 * 1024;
 /// Teto de fluxos simultaneos em remontagem.
 pub const MAX_FLOWS: usize = 4096;
+/// Teto de fluxos simultaneos por IP de origem; o excedente nao e remontado (e contado).
+pub const MAX_FLOWS_PER_SOURCE: usize = 64;
 /// Tempo maximo para o registro completar, contado desde o primeiro segmento.
 pub const TTL: Duration = Duration::from_secs(5);
 
@@ -71,6 +74,8 @@ pub struct Reassembler {
     /// Do mais antigo ao mais novo: despejo e expiracao saem do inicio.
     by_age: BTreeMap<(Duration, u64), FlowKey>,
     serial: u64,
+    /// Fluxos em remontagem por IP de origem (sem entradas zeradas).
+    per_source: HashMap<IpAddr, usize>,
     /// Fluxos descartados sem completar (lacuna, RST, truncamento, despejo ou validade).
     discarded: u64,
 }
@@ -110,6 +115,11 @@ impl Reassembler {
         self.flows.values().map(|f| f.buf.len()).sum()
     }
 
+    /// Fluxos em remontagem que partem de `ip`.
+    pub fn flows_from(&self, ip: IpAddr) -> usize {
+        self.per_source.get(&ip).copied().unwrap_or(0)
+    }
+
     /// Processa um segmento. `now` e o instante do pacote (desde a epoca Unix).
     pub fn feed(&mut self, now: Duration, key: FlowKey, seg: Segment<'_>) -> Outcome {
         self.expire(now);
@@ -147,13 +157,18 @@ impl Reassembler {
         let Some(total) = incomplete_client_hello(seg.payload) else {
             return Outcome::Passthrough;
         };
+        if self.flows_from(key.src_ip) >= MAX_FLOWS_PER_SOURCE {
+            self.discarded += 1;
+            return Outcome::Passthrough; // esta origem ja ocupa a sua cota
+        }
         while self.flows.len() >= MAX_FLOWS {
-            let Some((_, oldest)) = self.by_age.pop_first() else {
+            let Some(&oldest) = self.by_age.first_key_value().map(|(_, k)| k) else {
                 break;
             };
-            self.flows.remove(&oldest);
+            self.remove(&oldest);
             self.discarded += 1;
         }
+        *self.per_source.entry(key.src_ip).or_default() += 1;
         self.serial = self.serial.wrapping_add(1);
         let started = (now, self.serial);
         self.by_age.insert(started, key);
@@ -179,18 +194,24 @@ impl Reassembler {
     fn remove(&mut self, key: &FlowKey) -> Option<Flow> {
         let flow = self.flows.remove(key)?;
         self.by_age.remove(&flow.started);
+        if let Some(n) = self.per_source.get_mut(&key.src_ip) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                self.per_source.remove(&key.src_ip);
+            }
+        }
         Some(flow)
     }
 
     /// Descarta fluxos que passaram de `TTL`. O relogio dos pacotes pode andar para tras
-    /// (pcap fora de ordem): nesse caso nada expira.
-    fn expire(&mut self, now: Duration) {
-        while let Some(entry) = self.by_age.first_entry() {
-            if now.saturating_sub(entry.key().0) <= TTL {
+    /// (pcap fora de ordem): nesse caso nada expira. Quem captura ao vivo tambem a chama
+    /// com o relogio do sistema, para liberar a memoria quando o trafego para.
+    pub fn expire(&mut self, now: Duration) {
+        while let Some((&(started, _), &key)) = self.by_age.first_key_value() {
+            if now.saturating_sub(started) <= TTL {
                 break;
             }
-            let key = entry.remove();
-            self.flows.remove(&key);
+            self.remove(&key);
             self.discarded += 1;
         }
     }
