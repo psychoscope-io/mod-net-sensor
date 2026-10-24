@@ -1,11 +1,15 @@
 //! `--check`: confere o ambiente do sensor (fonte, filtro BPF, permissao de captura, fila e
 //! destino dos eventos) e diz o que corrigir, sem capturar nem enviar nada.
-use std::os::unix::net::UnixStream;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
+use std::path::Path;
 
-use crate::capture::sniffer::{self, CaptureConfig, Source};
+use crate::capture::sniffer::{self, CaptureConfig, CaptureError, Source};
 use crate::config::{Config, MAX_QUEUE_BYTES};
 use crate::explain::{CaptureContext, capture_hint, socket_hint};
 use crate::interfaces;
+use crate::protocols::LinkType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -98,23 +102,22 @@ fn capture_cfg(cfg: &Config) -> Option<CaptureConfig> {
     })
 }
 
-/// Roda todas as conferencias, na ordem em que o sensor depende delas.
+/// Resultado de abrir a fonte como a captura abriria.
+type Probe = Result<LinkType, CaptureError>;
+
+/// Roda todas as conferencias, na ordem em que o sensor depende delas. A abertura real da
+/// fonte vem antes do filtro BPF, porque so ela sabe o tipo de enlace em que o filtro vale.
 pub fn run(cfg: &Config) -> Report {
     let source = source(cfg);
-    let source_ok = source.status == Status::Ok;
+    let probe: Option<Probe> = (source.status == Status::Ok)
+        .then(|| capture_cfg(cfg))
+        .flatten()
+        .map(|cc| sniffer::probe(&cc));
     let mut items = vec![source];
     if let Some(expr) = &cfg.bpf {
-        items.push(filter(expr));
+        items.push(filter(expr, probe.as_ref()));
     }
-    items.push(if source_ok {
-        capture(cfg)
-    } else {
-        Item::warn(
-            "captura",
-            "nao verificada: a fonte tem problema (veja acima)",
-            None,
-        )
-    });
+    items.push(capture(cfg, probe.as_ref()));
     items.push(queue(cfg));
     items.push(destination(cfg));
     Report(items)
@@ -192,35 +195,68 @@ fn source(cfg: &Config) -> Item {
     }
 }
 
-fn filter(expr: &str) -> Item {
-    match sniffer::check_bpf(expr) {
-        Ok(()) => Item::ok("filtro BPF", format!("\"{expr}\" e valido")),
-        Err(e) => {
-            let ctx = CaptureContext {
-                interface: None,
-                pcap_file: None,
-                available: "",
-                exe: "",
-            };
-            Item::fail(
+/// Valido no enlace real quando a fonte abriu; sem isso, so a sintaxe (contra Ethernet) pode
+/// ser conferida, e um erro que nao seja de sintaxe fica como aviso (o filtro pode valer so em
+/// outro tipo de enlace).
+fn filter(expr: &str, probe: Option<&Probe>) -> Item {
+    match probe {
+        Some(Ok(link)) => Item::ok(
+            "filtro BPF",
+            format!("\"{expr}\" e valido no enlace {link:?}"),
+        ),
+        Some(Err(CaptureError::Filter(e))) => bpf_failure(e.to_string()),
+        _ => match sniffer::check_bpf(expr) {
+            Ok(()) => Item::ok(
                 "filtro BPF",
-                e.to_string(),
-                capture_hint(&e.to_string(), &ctx),
-            )
-        }
+                format!(
+                    "\"{expr}\" tem sintaxe valida (a confirmacao no enlace real depende de abrir a captura)"
+                ),
+            ),
+            Err(e) if e.to_string().to_lowercase().contains("syntax error") => {
+                bpf_failure(e.to_string())
+            }
+            Err(e) => Item::warn(
+                "filtro BPF",
+                format!("nao confirmado: {e}; pode ser valido no enlace real da interface"),
+                None,
+            ),
+        },
     }
 }
 
-fn capture(cfg: &Config) -> Item {
-    let Some(cc) = capture_cfg(cfg) else {
-        return Item::fail("captura", "nenhuma fonte informada", None);
+fn bpf_failure(text: String) -> Item {
+    let ctx = CaptureContext {
+        interface: None,
+        pcap_file: None,
+        available: "",
+        exe: "",
     };
-    match sniffer::probe(&cc) {
-        Ok(link) => Item::ok(
+    let fix = capture_hint(&text, &ctx).or_else(|| {
+        Some(
+            "ajuste --bpf para valer no tipo de enlace da fonte (veja `man pcap-filter`)"
+                .to_string(),
+        )
+    });
+    Item::fail("filtro BPF", text, fix)
+}
+
+fn capture(cfg: &Config, probe: Option<&Probe>) -> Item {
+    match probe {
+        None => Item::warn(
+            "captura",
+            "nao verificada: a fonte tem problema (veja acima)",
+            None,
+        ),
+        Some(Ok(link)) => Item::ok(
             "captura",
             format!("fonte aberta com sucesso (enlace {link:?})"),
         ),
-        Err(e) => {
+        Some(Err(CaptureError::Filter(_))) => Item::warn(
+            "captura",
+            "nao concluida por causa do filtro BPF (veja acima)",
+            None,
+        ),
+        Some(Err(e)) => {
             let text = e.to_string();
             let available = interfaces::list()
                 .map(|l| interfaces::names(&l))
@@ -249,6 +285,9 @@ fn queue(cfg: &Config) -> Item {
     )
 }
 
+/// Confere o socket do Core sem conectar: uma conexao sem Hello aparece no log do Core como
+/// "handshake falhou", ruido que o `--check` nao deve produzir num Core em producao. Existe,
+/// e um socket e o usuario pode escrever nele (a permissao que o connect exigiria).
 fn destination(cfg: &Config) -> Item {
     if cfg.print.is_some() {
         return Item::ok(
@@ -256,19 +295,50 @@ fn destination(cfg: &Config) -> Item {
             "os eventos serao impressos no terminal (--print); o Core nao e usado",
         );
     }
-    match UnixStream::connect(&cfg.socket) {
-        Ok(_) => Item::ok(
+    let path = &cfg.socket;
+    let warn = |detail: String, kind: std::io::ErrorKind| {
+        Item::warn(
             "destino",
-            format!("Core escutando em {}", cfg.socket.display()),
-        ),
-        Err(e) => Item::warn(
-            "destino",
-            format!("sem conexao com o Core em {}: {e}", cfg.socket.display()),
-            socket_hint(e.kind(), &cfg.socket).map(|h| {
+            detail,
+            socket_hint(kind, path).map(|h| {
                 format!("{h}; o sensor tenta reconectar sozinho, mas nenhum evento chega ate la")
             }),
+        )
+    };
+    match std::fs::metadata(path) {
+        Err(e) => warn(
+            format!("sem socket do Core em {}: {e}", path.display()),
+            e.kind(),
+        ),
+        Ok(m) if !m.file_type().is_socket() => Item::warn(
+            "destino",
+            format!("{} existe, mas nao e um socket", path.display()),
+            Some(
+                "aponte --socket para o socket do Core (o padrao e /var/run/psychoscope/core.sock)"
+                    .into(),
+            ),
+        ),
+        Ok(_) if !writable(path) => warn(
+            format!("sem permissao de escrita em {}", path.display()),
+            std::io::ErrorKind::PermissionDenied,
+        ),
+        Ok(_) => Item::ok(
+            "destino",
+            format!(
+                "socket do Core em {} com permissao de escrita (nao conectei, para nao gerar um handshake incompleto no log do Core)",
+                path.display()
+            ),
         ),
     }
+}
+
+/// O usuario efetivo pode escrever no caminho (`access(2)`; o mesmo que o connect exige).
+fn writable(path: &Path) -> bool {
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` e uma string C valida e termina em NUL durante a chamada; access so le o caminho.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
 }
 
 #[cfg(test)]
@@ -376,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listening_core_is_ok_and_an_unknown_interface_is_never_ok() {
+    fn a_present_core_socket_is_ok_and_an_unknown_interface_is_never_ok() {
         let d = dir("core");
         let sock = d.join("core.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
@@ -384,6 +454,151 @@ mod tests {
         let r = run(&cfg);
         assert_eq!(status_of(&r, "destino"), Status::Ok, "{}", r.render());
         assert_ne!(status_of(&r, "fonte"), Status::Ok, "{}", r.render());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Escreve um pcap vazio com o enlace `dlt` (113 = Linux cooked v1).
+    fn empty_pcap(d: &std::path::Path, dlt: u32) -> std::path::PathBuf {
+        let path = d.join(format!("dlt{dlt}.pcap"));
+        let mut f = std::fs::File::create(&path).unwrap();
+        write_pcap(&mut f, dlt, 65535, &[]).unwrap();
+        path
+    }
+
+    fn item<'a>(r: &'a Report, what: &str) -> &'a Item {
+        r.0.iter()
+            .find(|i| i.what == what)
+            .unwrap_or_else(|| panic!("sem item {what}"))
+    }
+
+    #[test]
+    fn the_filter_is_validated_on_the_real_link_not_only_on_ethernet() {
+        let d = dir("link");
+        let sll = empty_pcap(&d, 113);
+        // vale no enlace real (Linux cooked) e e aceito tambem como Ethernet
+        let ok = run(&parse(&[
+            "--pcap-file",
+            sll.to_str().unwrap(),
+            "--bpf",
+            "inbound",
+            "--print",
+        ]));
+        assert_eq!(item(&ok, "filtro BPF").status, Status::Ok);
+        assert!(
+            item(&ok, "filtro BPF").detail.contains("LinuxSll"),
+            "{}",
+            ok.render()
+        );
+        // `ether host` nao vale em Linux cooked: a falha vem do enlace real, com a causa do libpcap
+        let bad = run(&parse(&[
+            "--pcap-file",
+            sll.to_str().unwrap(),
+            "--bpf",
+            "ether host 02:00:00:00:00:01",
+            "--print",
+        ]));
+        assert_eq!(
+            item(&bad, "filtro BPF").status,
+            Status::Fail,
+            "{}",
+            bad.render()
+        );
+        assert!(
+            item(&bad, "filtro BPF")
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("pcap-filter")
+        );
+        assert_eq!(
+            item(&bad, "captura").status,
+            Status::Warn,
+            "sem repetir a mesma falha"
+        );
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn without_the_real_link_only_syntax_errors_are_failures() {
+        // fonte inexistente: a captura nao abre, entao so da para conferir contra Ethernet
+        let missing = "/tmp/nao-existe-check.pcap";
+        let syntax = run(&parse(&[
+            "--pcap-file",
+            missing,
+            "--bpf",
+            "udp port",
+            "--print",
+        ]));
+        assert_eq!(item(&syntax, "filtro BPF").status, Status::Fail);
+        // valido como Ethernet: aceito, dizendo que falta a confirmacao no enlace real
+        let fine = run(&parse(&[
+            "--pcap-file",
+            missing,
+            "--bpf",
+            "udp port 53",
+            "--print",
+        ]));
+        assert_eq!(item(&fine, "filtro BPF").status, Status::Ok);
+        assert!(item(&fine, "filtro BPF").detail.contains("enlace real"));
+        // invalido so como Ethernet (nao e erro de sintaxe): aviso, nao falha
+        let link_specific = run(&parse(&[
+            "--pcap-file",
+            missing,
+            "--bpf",
+            "ifname eth0",
+            "--print",
+        ]));
+        assert_eq!(
+            item(&link_specific, "filtro BPF").status,
+            Status::Warn,
+            "{}",
+            link_specific.render()
+        );
+    }
+
+    #[test]
+    fn the_core_socket_is_checked_without_connecting() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = dir("sock");
+        let pcap = pcap_in(&d);
+        let dest = |sock: &std::path::Path| {
+            let r = run(&parse(&[
+                "--pcap-file",
+                pcap.to_str().unwrap(),
+                "--socket",
+                sock.to_str().unwrap(),
+            ]));
+            let i = item(&r, "destino");
+            (i.status, i.detail.clone(), i.fix.clone())
+        };
+        // um arquivo comum no lugar do socket
+        let file = d.join("nao-e-socket");
+        std::fs::write(&file, b"x").unwrap();
+        let (st, detail, fix) = dest(&file);
+        assert_eq!(st, Status::Warn);
+        assert!(
+            detail.contains("nao e um socket") && fix.unwrap().contains("--socket"),
+            "{detail}"
+        );
+        // um socket que ninguem escuta: presente e gravavel, e a conferencia nao conecta (nao ha
+        // erro de conexao recusada, nem "handshake falhou" no log de um Core de verdade)
+        let sock = d.join("parado.sock");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        let (st, detail, _) = dest(&sock);
+        assert_eq!(st, Status::Ok, "{detail}");
+        assert!(detail.contains("nao conectei"), "{detail}");
+        // sem permissao de escrita (nao vale como root, que ignora o modo)
+        // SAFETY: geteuid nao tem precondicoes e nao falha.
+        if unsafe { libc::geteuid() } != 0 {
+            std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o400)).unwrap();
+            let (st, detail, fix) = dest(&sock);
+            assert_eq!(st, Status::Warn);
+            assert!(
+                detail.contains("sem permissao de escrita")
+                    && fix.unwrap().contains("modo e grupo"),
+                "{detail}"
+            );
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 }

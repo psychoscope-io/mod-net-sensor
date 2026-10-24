@@ -44,6 +44,9 @@ pub enum CaptureError {
         supported = crate::protocols::SUPPORTED_DLT
     )]
     UnsupportedLink(i32),
+    /// O libpcap recusou o filtro BPF (sintaxe, ou expressao que nao vale no enlace da fonte).
+    #[error("filtro BPF recusado: {0}")]
+    Filter(PcapError),
     #[error("falha ao iniciar a thread de captura: {0}")]
     Thread(std::io::Error),
 }
@@ -145,7 +148,7 @@ fn open_live(cfg: &CaptureConfig, name: &str) -> Result<Capture<Active>, Capture
         .buffer_size(KERNEL_BUFFER_BYTES)
         .open()?;
     if let Some(f) = &cfg.bpf {
-        cap.filter(f, true)?;
+        cap.filter(f, true).map_err(CaptureError::Filter)?;
     }
     Ok(cap)
 }
@@ -154,7 +157,7 @@ fn open_live(cfg: &CaptureConfig, name: &str) -> Result<Capture<Active>, Capture
 fn open_file(cfg: &CaptureConfig, path: &Path) -> Result<Capture<Offline>, CaptureError> {
     let mut cap = Capture::from_file(path)?;
     if let Some(f) = &cfg.bpf {
-        cap.filter(f, true)?;
+        cap.filter(f, true).map_err(CaptureError::Filter)?;
     }
     Ok(cap)
 }

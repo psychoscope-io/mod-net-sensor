@@ -131,7 +131,7 @@ fn invalid_bpf_unsupported_link_and_missing_file_fail_synchronously() {
     let (tx, _rx) = mpsc::channel(1);
     assert!(matches!(
         spawn(&cfg(path.clone(), Some("isto nao e bpf ((")), tx.clone()),
-        Err(CaptureError::Pcap(_))
+        Err(CaptureError::Filter(_))
     ));
 
     let weird = dir.path.join("weird.pcap");

@@ -87,11 +87,16 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-fn bpf_hint(lowercase_error: &str) -> Option<String> {
+/// O erro e de filtro BPF (sintaxe ou expressao), e nao de fonte ou permissao.
+fn is_bpf_error(error: &str) -> bool {
+    let e = error.to_lowercase();
     ["can't parse filter", "syntax error", "filter expression"]
         .iter()
-        .any(|n| lowercase_error.contains(n))
-        .then(|| "o filtro de --bpf e invalido: a sintaxe esta em `man pcap-filter` (exemplo: \"udp port 53 or tcp port 443\")".to_string())
+        .any(|n| e.contains(n))
+}
+
+fn bpf_hint(lowercase_error: &str) -> Option<String> {
+    is_bpf_error(lowercase_error).then(|| "o filtro de --bpf e invalido: a sintaxe esta em `man pcap-filter` (exemplo: \"udp port 53 or tcp port 443\")".to_string())
 }
 
 /// Dica para a falha ao conectar no socket do Core.

@@ -35,7 +35,7 @@ Sob o supervisor do Core, `PSYCHOSCOPE_SOCKET` e `PSYCHOSCOPE_MODULE_ID` são de
 | `--module-id <nome>` | `mod-net-sensor` | Identificador deste módulo (também `PSYCHOSCOPE_MODULE_ID`). |
 | `--exit-on-eof` | desligado | Com `--pcap-file`: encerra depois de enviar tudo, em vez de ficar ocioso. |
 | `--list-interfaces` | | Lista as interfaces (estado, tipo e endereços; as ativas com IPv4 primeiro) e sai. Só pode ser usado sozinho. |
-| `--check` | | Confere fonte, filtro BPF, permissão de captura, fila e destino dos eventos, mostra **como corrigir** cada problema e sai com 1 se algo falhar (avisos não contam). Não captura nem envia nada. |
+| `--check` | | Confere fonte, filtro BPF (no tipo de enlace real da fonte, quando ela abre), permissão de captura, fila e destino dos eventos, mostra **como corrigir** cada problema e sai com 1 se algo falhar (avisos não contam). Não captura, não envia nada e não conecta no Core: só confere se o socket existe e se você pode escrever nele, para não deixar um "handshake falhou" no log. |
 | `--print[=text\|json]` | | Imprime cada evento no stdout em vez de enviá-lo ao Core, que não precisa estar no ar. `text`: uma linha por evento; `json`: um objeto por linha, com os nomes de campo do contrato. Com `--pcap-file`, implica `--exit-on-eof`. |
 | `-v`, `--verbose` | desligado | Uma linha de resumo a cada 10 s no stderr (pacotes/s, eventos/s, perdas). |
 
@@ -49,7 +49,7 @@ Sob o supervisor do Core, `PSYCHOSCOPE_SOCKET` e `PSYCHOSCOPE_MODULE_ID` são de
 [ok]      fonte: interface wlp2s0 (192.168.0.8, ...)
 [falha]   captura: pcap: libpcap error: socket: Operation not permitted
          como corrigir: a captura exige CAP_NET_RAW e CAP_NET_ADMIN: uma vez, como administrador, rode `sudo setcap ...`
-[aviso]   destino: sem conexao com o Core em /var/run/psychoscope/core.sock: ...
+[aviso]   destino: sem socket do Core em /var/run/psychoscope/core.sock: ...
 ```
 
 Os mesmos textos aparecem quando a partida falha: interface inexistente (com a lista das que existem), interface desativada, arquivo ausente ou que não é pcap, filtro BPF inválido, permissão e Core fora do ar.

@@ -87,6 +87,12 @@ for k in perda.kernel perda.fila_captura perda.fila_eventos perda.ipc decode.mal
   grep -q "^psychoscope_module_counter_total{counter=$k,module=mod-net-sensor}  *0$" "$TMP/metrics.txt" || fail "contador $k deveria ser 0: $(grep module_counter "$TMP/metrics.txt")"
 done
 echo "ok: metricas ($EXPECTED eventos processados, 10 alertas, contadores de perdas e descartes)"
+# --check com o Core no ar: a conexao de teste nao pode derrubar nem confundir o modulo conectado
+"$SENSOR" --check --pcap-file "$TMP/t.pcap" --socket "$TMP/run/core.sock" > "$TMP/check_live.txt" || fail "--check com o Core no ar: $(cat "$TMP/check_live.txt")"
+grep -q "socket do Core em" "$TMP/check_live.txt" || fail "--check nao viu o socket do Core: $(cat "$TMP/check_live.txt")"
+[ "$(col ESTADO)" = "CONECTADO" ] || fail "o --check abalou o modulo conectado: $($CLI list)"
+if grep -q "handshake falhou" "$TMP/daemon.log"; then fail "o --check gerou ruido no log do Core: $(grep 'handshake falhou' "$TMP/daemon.log")"; fi
+echo "ok: --check com o Core no ar (modulo segue conectado e o log do Core sem ruido)"
 
 # Configuracao pelo canal de controle: a leitura vale para o usuario do daemon; a escrita e so do
 # root (UID do kernel), e este script roda sem privilegios. (O live_smoke.sh exercita a escrita.)
