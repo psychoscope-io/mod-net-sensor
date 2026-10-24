@@ -80,7 +80,13 @@ $CLI metrics > "$TMP/metrics.txt"
 grep -q "^psychoscope_engine_alerts_total  *10$" "$TMP/metrics.txt" || fail "metrica de alertas: $(grep alerts_total "$TMP/metrics.txt")"
 grep -q "^psychoscope_module_up{module=mod-net-sensor}  *1$" "$TMP/metrics.txt" || fail "metrica module_up ausente"
 grep -q "^psychoscope_engine_events_processed_total  *$EXPECTED$" "$TMP/metrics.txt" || fail "eventos processados no motor != $EXPECTED: $(grep events_processed "$TMP/metrics.txt")"
-echo "ok: metricas ($EXPECTED eventos processados, 10 alertas)"
+# O detalhe das perdas e descartes chega no mesmo status: o pcap tem 1 quadro ARP (nao suportado)
+# e nenhuma perda; o replay de arquivo nao descarta nada.
+grep -q "^psychoscope_module_counter_total{counter=decode.nao_suportado,module=mod-net-sensor}  *1$" "$TMP/metrics.txt" || fail "contador decode.nao_suportado: $(grep module_counter "$TMP/metrics.txt")"
+for k in perda.kernel perda.fila_captura perda.fila_eventos perda.ipc decode.malformado; do
+  grep -q "^psychoscope_module_counter_total{counter=$k,module=mod-net-sensor}  *0$" "$TMP/metrics.txt" || fail "contador $k deveria ser 0: $(grep module_counter "$TMP/metrics.txt")"
+done
+echo "ok: metricas ($EXPECTED eventos processados, 10 alertas, contadores de perdas e descartes)"
 
 # Configuracao pelo canal de controle: a leitura vale para o usuario do daemon; a escrita e so do
 # root (UID do kernel), e este script roda sem privilegios. (O live_smoke.sh exercita a escrita.)
@@ -95,7 +101,7 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 # TUI num pseudo-terminal real: deve mostrar o modulo conectado e os alertas.
-python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE mod-net-sensor CONECTADO "Alertas (10)" net.scan.syn net.dns.tunnel "ev/s" || fail "TUI"
+python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE mod-net-sensor CONECTADO "Alertas (10)" "Varredura de portas" "Túnel DNS" "ev/s" || fail "TUI"
 grep -q "telemetria recebida" "$TMP/daemon.log" || fail "core nao registrou telemetria"
 $CLI list
 
@@ -135,7 +141,7 @@ $CLI alerts --history --min-severity alta | tail -1 | grep -qx -- "-- 2 de 2 ale
 $CLI alerts --history --rule net.tls.suspicious | tail -1 | grep -qx -- "-- 3 de 3 alertas --" || fail "filtro de regra no historico"
 # o timestamp do alerta e o instante da deteccao (nao o do pcap, de 2023): todos entram em --since 1h
 $CLI alerts --history --since 1h | tail -1 | grep -qx -- "-- 10 de 10 alertas --" || fail "filtro --since 1h"
-python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE "Alertas (10)" net.beacon net.bruteforce.auth || fail "TUI apos reinicio"
+python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PSYCHOSCOPE "Alertas (10)" "Beacon" "Força bruta" || fail "TUI apos reinicio"
 echo "ok: 10 alertas recuperados do SQLite apos reiniciar o daemon (CLI e TUI)"
 kill -TERM "$DPID"; wait "$DPID"; DPID=""
 echo "E2E OK"
