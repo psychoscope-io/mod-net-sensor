@@ -10,13 +10,15 @@ Sensor de rede do Psychoscope em Rust: **Source → Decode → Sink**. Captura p
 - `src/pipeline.rs`: `decode_loop` (estado em `Decoder`, expiração ociosa da remontagem ao vivo) e `SensorController` (contadores no `StatsSnapshot`). `src/ipc/`: `framer.rs` e `client.rs` (Hello, reconexão com backoff, status, comandos), com o contrato `Controller`/`StatsSnapshot` em `client/controller.rs`. `src/main.rs` só liga as etapas (captura, decode, destino Core ou `--print`, sinais, resumo, encerramento).
 - Diagnóstico e uso: `src/interfaces.rs` (`--list-interfaces`), `src/check.rs` (`--check`), `src/explain.rs` (erros → instruções, funções puras), `src/output.rs` (`--print`, texto e JSON), `src/summary.rs` (resumo final e de `-v`). `benches/hot_path.rs` + `make bench` medem o caminho quente (`docs/DESEMPENHO.md`).
 - Testes dos módulos grandes ficam ao lado, em `<modulo>/tests.rs` (`ipc/client`, `reassembly`, `capture/sniffer`).
-- `fuzz/` (cargo-fuzz), `scripts/` (`demo.sh`, `e2e.sh`, `live_smoke.sh`, `fuzz.sh`, `gen_pcap.py`).
+- `fuzz/` (cargo-fuzz), `scripts/` (`demo.sh`, `e2e.sh`, `live_smoke.sh`, `fuzz.sh`, `gen_pcap.py`; `lib/build.sh` é o prólogo comum de demo, e2e e live_smoke: PATH do Go, local-deps, busca e build do Core; `tag.sh` é cópia compartilhada).
 
 ## Comandos
 
 ```bash
 make hooks              # uma vez por clone: ativa commit-msg, pre-commit e pre-push
 make check              # o que o CI roda: fmt, clippy -D warnings, shellcheck, actionlint, cargo deny, cargo test
+make build              # dist/mod-net-sensor (release, --locked)
+make tag                # scripts/tag.sh: sobe a versão do Cargo.toml/Cargo.lock, commit de versão e tag anotada (local; o push é seu)
 scripts/demo.sh         # demo interativa para quem vai testar (clona o core se faltar); não faz parte do CI
 scripts/e2e.sh          # daemon Go real + pcap sintético; exige ../psychoscope-core
 scripts/live_smoke.sh   # captura ao vivo em `lo` dentro de `unshare -Urn`

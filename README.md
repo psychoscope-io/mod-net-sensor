@@ -102,6 +102,8 @@ sudo setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/mod-net-sensor
 
 O Core (e o supervisor) seguem sem privilégios. Requer `libpcap-dev` para compilar e `libpcap` para executar.
 
+Compilar: `make build` gera `dist/mod-net-sensor` (`cargo build --release --locked`). Para montar o ambiente inteiro (clonar os três repositórios, atualizar e compilar tudo em `dist/`), use `scripts/dev.sh` do repositório [.github](https://github.com/psychoscope-io/.github).
+
 ## Testar em minutos (demo)
 
 `scripts/demo.sh` compila o Core e o sensor, sobe o daemon com um pcap sintético malicioso (sem privilégios e sem tocar na sua rede) e abre a TUI com 10 alertas para você explorar. Requer `go`, `cargo`, `python3` e `libpcap-dev`; se `../psychoscope-core` não existir, o Core é clonado em `~/.cache/psychoscope-demo` (ou aponte um checkout com `PSYCHOSCOPE_CORE`).
@@ -150,5 +152,5 @@ Apache License 2.0 — veja [LICENSE](LICENSE).
 Cada tag `vX.Y.Z` (igual à versão do `Cargo.toml`) publica tarballs `linux/amd64` e `linux/arm64`, `SHA256SUMS` e atestado de
 proveniência (`gh attestation verify <tarball> --repo psychoscope-io/mod-net-sensor`). O binário é compilado em Ubuntu 22.04
 (glibc 2.35) e precisa de `libpcap0.8` em tempo de execução. A instalação como serviço (usuário dedicado, `setcap` e unit do
-systemd) é feita pelo `install.sh` do `psychoscope-core`: veja `docs/INSTALL.md` naquele repositório.
+systemd) é feita pelo `get.sh` (baixa, confere e instala Core e sensor; depois, `psychoscope-update`) ou pelo `install.sh` do `psychoscope-core`: veja `docs/INSTALL.md` naquele repositório. Para criar a tag da próxima versão: `make tag` (`scripts/tag.sh`, só local; ajusta `Cargo.toml`/`Cargo.lock` e o push é seu).
 
