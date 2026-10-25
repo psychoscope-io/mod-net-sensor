@@ -1,5 +1,5 @@
 # Atalhos de desenvolvimento. `make check` e o que o CI e o hook pre-push executam.
-.PHONY: build clean fmt lint deny test check precommit hooks bench
+.PHONY: build clean fmt lint deny test check precommit hooks bench tag
 
 # Receita unica de compilacao (a versao vem do Cargo.toml). Requer libpcap-dev.
 DIST ?= dist
@@ -42,3 +42,7 @@ bench:
 # Ativa os hooks versionados em .githooks (commit-msg, pre-commit, pre-push).
 hooks:
 	git config core.hooksPath .githooks
+
+# Cria a tag anotada da proxima versao (interativo; so local, nao faz push). Veja scripts/tag.sh --help.
+tag:
+	scripts/tag.sh
