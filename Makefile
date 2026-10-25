@@ -1,5 +1,16 @@
 # Atalhos de desenvolvimento. `make check` e o que o CI e o hook pre-push executam.
-.PHONY: fmt lint deny test check precommit hooks bench
+.PHONY: build clean fmt lint deny test check precommit hooks bench
+
+# Receita unica de compilacao (a versao vem do Cargo.toml). Requer libpcap-dev.
+DIST ?= dist
+
+build:
+	cargo build --release --locked
+	mkdir -p $(DIST)
+	cp target/release/mod-net-sensor $(DIST)/mod-net-sensor
+
+clean:
+	rm -rf dist
 
 fmt:
 	cargo fmt
