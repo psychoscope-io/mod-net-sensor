@@ -5,12 +5,11 @@
 # reiniciar o daemon), TUI, comandos (pausar/retomar/reconfigurar/encerrar) e desligamento gracioso.
 # Requer ../psychoscope-core. Nao exige privilegios (usa --pcap-file).
 set -euo pipefail
-export PATH="$HOME/.local/go/bin:$PATH"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-# Layout de desenvolvimento (repos irmaos): resolve psychoscope-proto a partir do checkout local.
 # shellcheck source=/dev/null
-[ -f "$HERE/../psychoscope-proto/scripts/local-deps.sh" ] && source "$HERE/../psychoscope-proto/scripts/local-deps.sh"
-CORE="$HERE/../psychoscope-core"
+source "$HERE/scripts/lib/build.sh"
+psy_env "$HERE"
+CORE="$(psy_find_core "$HERE")" || exit 1
 TMP="$(mktemp -d)"
 DPID=""
 cleanup() {
@@ -21,7 +20,7 @@ trap cleanup EXIT
 fail() { echo "FALHOU: $*" >&2; echo "--- log do daemon ---" >&2; cat "$TMP/daemon.log" >&2 || true; exit 1; }
 
 EXPECTED=$(python3 "$HERE/scripts/gen_pcap.py" "$TMP/t.pcap")
-(cd "$CORE" && go build -o "$TMP/psychoscope" ./cmd/psychoscope && go build -o "$TMP/psychoscope-cli" ./cmd/psychoscope-cli)
+psy_build_core "$CORE" "$TMP"
 (cd "$HERE" && cargo build -q)
 SENSOR="$HERE/target/debug/mod-net-sensor"
 

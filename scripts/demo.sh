@@ -4,34 +4,17 @@
 # Requer go, cargo, python3 e libpcap-dev. Se ../psychoscope-core nao existir, o Core e clonado
 # em ~/.cache/psychoscope-demo (ou use PSYCHOSCOPE_CORE=<caminho> para apontar um checkout).
 set -euo pipefail
-export PATH="$HOME/.local/go/bin:$PATH"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-CORE_REPO="https://github.com/psychoscope-io/psychoscope-core"
+# shellcheck source=/dev/null
+source "$HERE/scripts/lib/build.sh"
 
 die() { echo "erro: $*" >&2; exit 1; }
+psy_env "$HERE"
 for tool in go cargo python3; do
   command -v "$tool" >/dev/null || die "'$tool' nao encontrado no PATH; instale-o e tente de novo (veja o README)"
 done
 
-# Layout de desenvolvimento (repos irmaos): resolve psychoscope-proto a partir do checkout local.
-# shellcheck source=/dev/null
-[ -f "$HERE/../psychoscope-proto/scripts/local-deps.sh" ] && source "$HERE/../psychoscope-proto/scripts/local-deps.sh"
-
-find_core() {
-  if [ -n "${PSYCHOSCOPE_CORE:-}" ]; then echo "$PSYCHOSCOPE_CORE"; return; fi
-  if [ -d "$HERE/../psychoscope-core" ]; then echo "$HERE/../psychoscope-core"; return; fi
-  local cache="${XDG_CACHE_HOME:-$HOME/.cache}/psychoscope-demo/psychoscope-core"
-  command -v git >/dev/null || die "'git' nao encontrado; instale-o ou defina PSYCHOSCOPE_CORE"
-  if [ -d "$cache/.git" ]; then
-    git -C "$cache" pull -q --ff-only >&2 || echo "aviso: nao foi possivel atualizar $cache; usando a copia existente" >&2
-  else
-    echo "clonando $CORE_REPO em $cache ..." >&2
-    git clone -q --depth 1 "$CORE_REPO" "$cache" >&2
-  fi
-  echo "$cache"
-}
-CORE="$(find_core)"
-[ -f "$CORE/go.mod" ] || die "'$CORE' nao parece o psychoscope-core (sem go.mod)"
+CORE="$(psy_find_core "$HERE" clone)" || exit 1
 
 TMP="$(mktemp -d)"
 DPID=""
@@ -45,7 +28,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "compilando (a primeira vez demora alguns minutos) ..."
-(cd "$CORE" && go build -o "$TMP/psychoscope" ./cmd/psychoscope && go build -o "$TMP/psychoscope-cli" ./cmd/psychoscope-cli)
+psy_build_core "$CORE" "$TMP"
 (cd "$HERE" && cargo build -q --release) || die "falha ao compilar o sensor; confirme que libpcap-dev esta instalado"
 EXPECTED=$(python3 "$HERE/scripts/gen_pcap.py" "$TMP/t.pcap")
 
