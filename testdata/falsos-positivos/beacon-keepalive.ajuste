@@ -1,0 +1,2 @@
+--set
+detection.beacon.ignore_destinations=198.51.100.7

@@ -120,11 +120,21 @@ Na TUI: `tab` alterna os painéis, `j`/`k` navegam, `p` pausa, `r` retoma e `x` 
 ```
 cargo test                    # unitários + proptest + mock do Core
 scripts/demo.sh               # demo interativa: daemon + pcap sintético + TUI
-scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 330 eventos, 10 alertas exatos, contadores, TUI em pty, comandos, SQLite, shutdown
+scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 330 eventos, 10 alertas exatos, contadores, TUI em pty, comandos, SQLite, shutdown,
+                              # `psychoscope-cli analyze` sobre o mesmo pcap e o catálogo de falsos positivos
+scripts/analyze_fp.sh <cli> <sensor>  # só o catálogo: roda `analyze` em testdata/falsos-positivos/*.pcap e confere .esperado e .ajuste
 make bench                    # benchmark do caminho quente (veja docs/DESEMPENHO.md)
 scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn` (sem sudo)
 scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padrão 60); exige nightly
 ```
+
+### Catálogo de falsos positivos
+
+`testdata/falsos-positivos/` guarda, por caso, um pcap **sintético** (só endereços de documentação, gerado por `scripts/gen_fp_pcap.py`; captura real nunca entra
+aqui), o `<nome>.esperado` (regras que ainda disparam com os limiares padrão; uma regra listada é um falso positivo conhecido e ainda não corrigido, e quando
+for corrigido o teste falha e o arquivo deve ser esvaziado) e, opcionalmente, o `<nome>.ajuste` (argumentos do `psychoscope-cli analyze`, um por linha, que
+silenciam o alerta). Hoje: `beacon-keepalive` (aplicativo que reabre a conexão a cada ~30 s). A receita para criar um caso novo está em
+`psychoscope-core/docs/FALSOS-POSITIVOS.md`. O `analyze` precisa do `psychoscope-cli` da versão que tem o subcomando.
 
 ### Fuzzing
 

@@ -184,4 +184,13 @@ grep -q "como corrigir" "$TMP/check_bad.txt" || fail "--check sem instrucao: $(c
 "$SENSOR" --pcap-file "$TMP/t.pcap" --exit-on-eof --socket "$TMP/sem-core.sock" 2> "$TMP/nocore.err" || true
 grep -q "AVISO: nenhum evento chegou ao Core" "$TMP/nocore.err" || fail "replay sem Core deveria avisar: $(cat "$TMP/nocore.err")"
 echo "ok: sem o Core: --print (texto e JSON), --check e o aviso de replay sem Core"
+# Analise offline (psychoscope-cli analyze): sem o Core, o mesmo pcap deve dar EXATAMENTE os
+# mesmos 10 alertas do daemon, sem tocar no estado do servico, e o catalogo de falsos positivos
+# (testdata/falsos-positivos) deve bater com o esperado.
+"$TMP/psychoscope-cli" analyze --sensor "$SENSOR" --json "$TMP/t.pcap" > "$TMP/analyze.json" || fail "analyze"
+python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); sys.exit(0 if j["eventos"] == int(sys.argv[2]) and len(j["alertas"]) == 10 and j["por_regra"].get("net.tls.suspicious") == 3 and not j["incompleta"] else 1)' "$TMP/analyze.json" "$EXPECTED" || fail "analyze: esperados $EXPECTED eventos e 10 alertas: $(head -c 600 "$TMP/analyze.json")"
+rc=0; "$TMP/psychoscope-cli" analyze --sensor "$SENSOR" --fail-on-alert "$TMP/t.pcap" > /dev/null || rc=$?
+[ "$rc" = 2 ] || fail "analyze --fail-on-alert deveria sair com 2 diante de alertas, saiu com $rc"
+echo "ok: analyze offline reproduz os 10 alertas do daemon"
+"$HERE/scripts/analyze_fp.sh" "$TMP/psychoscope-cli" "$SENSOR" || fail "catalogo de falsos positivos"
 echo "E2E OK"
