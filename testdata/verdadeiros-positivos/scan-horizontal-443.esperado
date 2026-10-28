@@ -1,0 +1,2 @@
+# Varredura horizontal da 443: 150 hosts que nao respondem. TEM de disparar, mesmo com o criterio de SYN-ACK.
+net.scan.syn

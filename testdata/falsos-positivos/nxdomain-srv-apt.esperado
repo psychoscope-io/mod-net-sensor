@@ -1,0 +1,1 @@
+# Consultas SRV (_https._tcp.*) que voltam NXDOMAIN, como o apt: nao e DGA. Nenhuma regra dispara.

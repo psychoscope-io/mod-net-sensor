@@ -1,0 +1,2 @@
+# Varredura vertical (nmap): 100 portas de um host em 2 s. TEM de disparar.
+net.scan.syn

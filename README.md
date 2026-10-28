@@ -128,13 +128,19 @@ scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn`
 scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padrão 60); exige nightly
 ```
 
-### Catálogo de falsos positivos
+### Catálogo de casos (falsos e verdadeiros positivos)
 
-`testdata/falsos-positivos/` guarda, por caso, um pcap **sintético** (só endereços de documentação, gerado por `scripts/gen_fp_pcap.py`; captura real nunca entra
-aqui), o `<nome>.esperado` (regras que ainda disparam com os limiares padrão, uma por linha; `#` abre comentário. Uma regra listada é um falso positivo conhecido, mantido de propósito
-quando o sinal da regra não o separa do ataque, e quando a regra passar a distingui-lo o teste falha e o arquivo deve ser esvaziado) e, opcionalmente, o `<nome>.ajuste` (argumentos do `psychoscope-cli analyze`, um por linha, que
-silenciam o alerta). Hoje: `beacon-keepalive` (aplicativo que reabre a conexão a cada ~30 s). A receita para criar um caso novo está em
-`psychoscope-core/docs/FALSOS-POSITIVOS.md`. O `analyze` precisa do `psychoscope-cli` da versão que tem o subcomando.
+Dois diretórios de pcaps **sintéticos** (só endereços de documentação, gerados por `scripts/gen_fp_pcap.py`; captura real nunca entra aqui):
+
+- `testdata/falsos-positivos/`: o alerta é indevido. Hoje: `beacon-keepalive` (aplicativo que reabre a conexão a cada ~30 s), `nxdomain-srv-apt` (consultas SRV `_https._tcp.*`
+  que dão NXDOMAIN, como o apt), `scan-web-navegador` (40 conexões na 443 com handshake completo) e `tls-sni-azure-blob` (rótulo de 20 letras sob um armazenamento de nuvem).
+- `testdata/verdadeiros-positivos/`: o alerta **tem** de disparar, para que nenhum ajuste de limiar o perca: `scan-nmap-vertical`, `scan-horizontal-443` (150 hosts
+  sem resposta) e `nxdomain-dga-com-srv` (DGA misturado a consultas SRV).
+
+Ao lado de cada pcap: `<nome>.esperado` (regras que disparam com os limiares padrão, uma por linha; `#` abre comentário. Nos falsos positivos, uma regra listada é um caso
+conhecido, mantido de propósito quando o sinal da regra não o separa do ataque; quando a regra passar a distingui-lo, o teste falha e o arquivo deve ser esvaziado) e,
+opcionalmente, `<nome>.ajuste` (argumentos do `psychoscope-cli analyze`, um por linha, que silenciam o alerta). A receita para criar um caso novo está em
+`psychoscope-core/docs/FALSOS-POSITIVOS.md`. O `analyze` precisa do `psychoscope-cli` da versão que tem o subcomando (e, para estes casos, da que tem os ajustes das regras).
 
 ### Fuzzing
 

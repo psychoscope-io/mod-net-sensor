@@ -1,0 +1,2 @@
+# DGA (12 nomes aleatorios) misturado a 30 consultas SRV. TEM de disparar so pelos nomes diretos.
+net.dns.nxdomain_burst

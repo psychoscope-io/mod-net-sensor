@@ -1,0 +1,3 @@
+# Rotulo de 20 letras com entropia acima do limiar, sob um armazenamento de nuvem: o limiar
+# nao separa isso do ataque, entao a saida e liberar so o sufixo do armazenamento (.ajuste).
+net.tls.suspicious

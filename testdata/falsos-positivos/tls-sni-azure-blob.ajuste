@@ -1,0 +1,2 @@
+--set
+detection.tls.allowed_bases=blob.core.example.net
