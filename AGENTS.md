@@ -30,7 +30,7 @@ Requer `libpcap-dev`. Ferramentas fora do `Cargo.toml`: `cargo-deny` (`cargo ins
 ## Regras e skills
 
 Regras (`.claude/rules/`): as oito compartilhadas (`fluxo-de-trabalho`, `principios-de-design`, `organizacao-do-codigo`, `testes-e-verificacao`, `git-e-publicacao`, `seguranca`, `contrato-proto`, `estilo-e-idioma`) e `rust`, `protocolos` (deste repositório).
-Skills (`.claude/skills/`): `adicionar-decoder-de-protocolo`, `verificar-sensor`, `refatorar-sem-quebrar`, `revisar-pr-dependabot`, `publicar-versao`.
+Skills (`.claude/skills/`): `adicionar-decoder-de-protocolo`, `adicionar-caso-de-falso-positivo`, `verificar-sensor`, `refatorar-sem-quebrar`, `revisar-pr-dependabot`, `publicar-versao`.
 
 ## Armadilhas conhecidas
 
