@@ -150,6 +150,27 @@ python3 "$CORE/scripts/tui_pty.py" "$TMP/psychoscope-cli" "$TMP/run/ctl.sock" PS
 echo "ok: 10 alertas recuperados do SQLite apos reiniciar o daemon (CLI e TUI)"
 kill -TERM "$DPID"; wait "$DPID"; DPID=""
 
+# Estado do motor: um daemon novo, COM o sensor reenviando o MESMO pcap, nao repete os alertas
+# cujo cooldown ainda valia no fim da execucao anterior, porque os cooldowns e as series do beacon
+# voltaram de engine-state.json (gravado no encerramento do primeiro daemon; o segundo, sem
+# eventos, nao o reescreveu). O pcap volta no tempo (replay), entao as regras de cooldown curto,
+# ja vencidas no instante final do replay anterior, podem alertar de novo: aqui so se exige que
+# as de cooldown longo (beacon, 30 min; TLS, 10 min; pico de DNS) nao se repitam.
+[ "$(stat -c %a "$TMP/state/engine-state.json")" = 600 ] || fail "engine-state.json deve ter modo 0600"
+"$TMP/psychoscope" --config "$TMP/cfg.json" --socket "$TMP/run/core.sock" --ctl-socket "$TMP/run/ctl.sock" --log-level debug 2> "$TMP/daemon3.log" &
+DPID=$!
+wait_for "ctl.sock no 3o daemon" bash -c "$CLI list"
+wait_for "motor processar os $EXPECTED eventos reenviados" bash -c "$CLI metrics | grep -q '^psychoscope_engine_events_processed_total  *$EXPECTED\$'"
+$CLI metrics > "$TMP/metrics3.txt"
+awk '/^psychoscope_engine_alerts_suppressed_total/ {ok = ($2 >= 1)} END {exit !ok}' "$TMP/metrics3.txt" || fail "o cooldown restaurado deveria ter suprimido alertas: $(grep suppressed "$TMP/metrics3.txt")"
+grep -q "estado do motor restaurado.*net.beacon" "$TMP/daemon3.log" || fail "o log nao registra a restauracao do estado do beacon: $(grep -i estado "$TMP/daemon3.log")"
+for rule_count in net.beacon:1 net.tls.suspicious:3 net.dns.rate:1; do
+  rule=${rule_count%%:*}; want=${rule_count##*:}
+  $CLI alerts --history -n 100 --rule "$rule" | tail -1 | grep -qx -- "-- $want de $want alertas --" || fail "$rule nao pode se repetir apos o reinicio: $($CLI alerts --history -n 100 --rule "$rule" | tail -1)"
+done
+echo "ok: estado do motor restaurado: beacon, TLS e pico de DNS nao se repetem ao reenviar o mesmo trafego apos o reinicio"
+kill -TERM "$DPID"; wait "$DPID"; DPID=""
+
 # Sem Core: --print mostra os mesmos eventos, --check confere o ambiente e um replay que nunca
 # falou com o Core avisa em vez de parecer sucesso.
 "$SENSOR" --pcap-file "$TMP/t.pcap" --print > "$TMP/print.txt" 2> "$TMP/print.err" || fail "--print"
