@@ -35,7 +35,7 @@ cat > "$TMP/cfg.json" <<JSON
     "stop_grace": "5s"
   }],
   "storage": { "path": "$TMP/state/alerts.db" },
-  "overrides_path": "$TMP/state/overrides.json"
+  "overrides_path": "$TMP/state/overrides.json", "engine_state_path": "$TMP/state/engine-state.json"
 }
 JSON
 CLI="$TMP/psychoscope-cli --ctl-socket $TMP/run/ctl.sock"
@@ -134,7 +134,7 @@ echo "ok: shutdown gracioso do daemon"
 
 # Persistencia: um daemon NOVO, sem modulos, ainda conhece os 10 alertas (SQLite).
 cat > "$TMP/cfg2.json" <<JSON
-{ "status_interval": "1s", "storage": { "path": "$TMP/state/alerts.db" }, "overrides_path": "$TMP/state/overrides.json" }
+{ "status_interval": "1s", "storage": { "path": "$TMP/state/alerts.db" }, "overrides_path": "$TMP/state/overrides.json", "engine_state_path": "$TMP/state/engine-state.json" }
 JSON
 [ "$(stat -c %a "$TMP/state/alerts.db")" = 600 ] || fail "banco de alertas deve ter modo 0600"
 "$TMP/psychoscope" --config "$TMP/cfg2.json" --socket "$TMP/run/core.sock" --ctl-socket "$TMP/run/ctl.sock" --log-level debug 2> "$TMP/daemon2.log" &

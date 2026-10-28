@@ -42,7 +42,8 @@ cat > "$TMP/cfg.json" <<JSON
     "connect_timeout": "10s",
     "stop_grace": "5s"
   }],
-  "storage": { "path": "$TMP/state/alerts.db" }
+  "storage": { "path": "$TMP/state/alerts.db" },
+  "engine_state_path": "$TMP/state/engine-state.json"
 }
 JSON
 CLI="$TMP/psychoscope-cli --ctl-socket $TMP/run/ctl.sock"
