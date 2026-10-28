@@ -2,10 +2,11 @@
 # Catalogo de falsos positivos: roda `psychoscope-cli analyze` sobre cada pcap de
 # testdata/falsos-positivos/ e confere o resultado. Sem privilegios e sem o servico.
 #   <nome>.pcap      pcap sintetico (so enderecos de documentacao; gerado por scripts/gen_fp_pcap.py)
-#   <nome>.esperado  regras que ainda disparam com os limiares PADRAO, uma por linha. Vazio ou
-#                    ausente = nenhum alerta. Uma regra listada e um falso positivo conhecido e
-#                    ainda nao corrigido: quando a regra for corrigida, o teste falha e o
-#                    arquivo deve ser esvaziado.
+#   <nome>.esperado  regras que ainda disparam com os limiares PADRAO, uma por linha (linhas com #
+#                    sao comentarios). Vazio ou ausente = nenhum alerta. Uma regra listada e um
+#                    falso positivo conhecido: ou deliberadamente mantido (o sinal da regra nao
+#                    o separa do ataque; a saida e o .ajuste) ou ainda nao corrigido. Quando a
+#                    regra passar a distingui-lo, o teste falha e o arquivo deve ser esvaziado.
 #   <nome>.ajuste    (opcional) argumentos do analyze, um por linha (por exemplo --set e o
 #                    campo=valor), que PRECISAM silenciar todos os alertas: a documentacao
 #                    de como resolver o falso positivo, verificada.
@@ -27,7 +28,7 @@ for pcap in "${casos[@]}"; do
   "$CLI" analyze --sensor "$SENSOR" --json "$pcap" > "$TMP/out.json" || fail "$nome: analyze falhou"
   python3 -c 'import json,sys; print("\n".join(sorted(json.load(sys.stdin)["por_regra"])))' < "$TMP/out.json" > "$TMP/obtido.txt"
   : > "$TMP/esperado.txt"
-  if [ -f "$base.esperado" ]; then grep -v '^$' "$base.esperado" | sort > "$TMP/esperado.txt" || true; fi
+  if [ -f "$base.esperado" ]; then grep -v -e '^$' -e '^#' "$base.esperado" | sort > "$TMP/esperado.txt" || true; fi
   diff -u "$TMP/esperado.txt" "$TMP/obtido.txt" > "$TMP/diff.txt" || fail "$nome: regras que disparam diferem do .esperado (- esperado, + obtido):
 $(cat "$TMP/diff.txt")"
   if [ -f "$base.ajuste" ]; then

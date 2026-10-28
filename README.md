@@ -131,8 +131,8 @@ scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padr�
 ### Catálogo de falsos positivos
 
 `testdata/falsos-positivos/` guarda, por caso, um pcap **sintético** (só endereços de documentação, gerado por `scripts/gen_fp_pcap.py`; captura real nunca entra
-aqui), o `<nome>.esperado` (regras que ainda disparam com os limiares padrão; uma regra listada é um falso positivo conhecido e ainda não corrigido, e quando
-for corrigido o teste falha e o arquivo deve ser esvaziado) e, opcionalmente, o `<nome>.ajuste` (argumentos do `psychoscope-cli analyze`, um por linha, que
+aqui), o `<nome>.esperado` (regras que ainda disparam com os limiares padrão, uma por linha; `#` abre comentário. Uma regra listada é um falso positivo conhecido, mantido de propósito
+quando o sinal da regra não o separa do ataque, e quando a regra passar a distingui-lo o teste falha e o arquivo deve ser esvaziado) e, opcionalmente, o `<nome>.ajuste` (argumentos do `psychoscope-cli analyze`, um por linha, que
 silenciam o alerta). Hoje: `beacon-keepalive` (aplicativo que reabre a conexão a cada ~30 s). A receita para criar um caso novo está em
 `psychoscope-core/docs/FALSOS-POSITIVOS.md`. O `analyze` precisa do `psychoscope-cli` da versão que tem o subcomando.
 

@@ -8,7 +8,7 @@ O catálogo vive em `testdata/falsos-positivos/` e é conferido por `scripts/ana
 
 1. **Reproduza o alerta** com `psychoscope-cli analyze --rule <regra> captura.pcap` (receita completa em `psychoscope-core/docs/FALSOS-POSITIVOS.md`).
 2. **Nunca commite a captura real.** Recrie o padrão em `scripts/gen_fp_pcap.py`: uma função nova que devolve os pacotes (só endereços de documentação: `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`; nomes `example.com`; semente fixa) e uma linha em `__main__` que grava `testdata/falsos-positivos/<nome>.pcap`. Rode `python3 scripts/gen_fp_pcap.py` e commite o `.pcap` gerado.
-3. **Escreva `<nome>.esperado`:** as regras que ainda disparam com os limiares PADRÃO, uma por linha (arquivo vazio = nenhum alerta). Regra listada = falso positivo conhecido e ainda não corrigido.
+3. **Escreva `<nome>.esperado`:** as regras que ainda disparam com os limiares PADRÃO, uma por linha (arquivo vazio = nenhum alerta). Regra listada = falso positivo conhecido: mantido de propósito (o sinal da regra não o separa do ataque; registre o porquê num comentário `#` e em `REGRAS.md`) ou ainda não corrigido. Linhas com `#` são comentários.
 4. **Escreva `<nome>.ajuste`** (opcional, mas é o que torna o caso útil): os argumentos do `analyze`, um por linha, que silenciam o alerta (`--set` na linha de cima e `detection.<regra>.<campo>=valor` na de baixo). O script exige que o `analyze --fail-on-alert` com eles saia com 0.
 5. **Se a correção muda a regra ou os limiares padrão**, esvazie o `.esperado` no mesmo commit: o teste falha de propósito quando o falso positivo some.
 6. Rode `scripts/analyze_fp.sh <psychoscope-cli> <mod-net-sensor>` e `scripts/e2e.sh`; prove que morde (esvazie o `.esperado` ou estrague o `.ajuste` e veja falhar).

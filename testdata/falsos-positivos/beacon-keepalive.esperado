@@ -1,1 +1,3 @@
+# Decisao registrada: os limiares padrao do net.beacon NAO mudam por este caso (keepalive por
+# reconexao e beacon real sao indistinguiveis pelo tempo). A saida e o .ajuste ao lado.
 net.beacon
