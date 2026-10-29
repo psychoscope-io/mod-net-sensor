@@ -1,0 +1,4 @@
+# Pagina pesada: ~210 consultas (A e AAAA) a ~100 dominios em 8 s, no perfil do observado em maquina
+# real. O volume sozinho nao separa isso de um ataque, entao o padrao fica (min_queries=200) e a
+# saida e subir o limiar (.ajuste).
+net.dns.rate

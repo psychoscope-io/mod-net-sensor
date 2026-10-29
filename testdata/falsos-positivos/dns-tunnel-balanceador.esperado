@@ -1,0 +1,4 @@
+# Seis nomes de balanceador de carga da nuvem: rotulo de 32 hex, longo e de alta entropia, como o
+# alerta observado em maquina real. O limiar nao os separa de dados codificados; a saida e liberar
+# so o dominio base (.ajuste).
+net.dns.tunnel

@@ -8,10 +8,14 @@ ainda dispara com os limiares padrao e o que o silencia):
   nxdomain-srv-apt     consultas SRV _https._tcp.* que voltam NXDOMAIN, como o apt (nxdomain_burst)
   scan-web-navegador   navegador que abre 40 conexoes na 443 com handshake completo (net.scan.syn)
   tls-sni-azure-blob   SNI de armazenamento de nuvem com rotulo parecido com aleatorio (tls)
+  dns-rate-navegador   navegador carregando pagina pesada: ~210 consultas a ~100 dominios em 8 s (net.dns.rate)
+  dns-tunnel-balanceador  nomes de balanceador de carga da nuvem com rotulo longo e aleatorio (net.dns.tunnel)
 testdata/verdadeiros-positivos/ (o alerta TEM de disparar; guarda o que um ajuste nao pode perder):
   scan-nmap-vertical           100 portas de um host, algumas com RST (net.scan.syn, vertical)
   scan-horizontal-443          150 hosts na 443 que nao respondem (net.scan.syn, horizontal)
   nxdomain-dga-com-srv         DGA misturado a consultas SRV (net.dns.nxdomain_burst)
+  dns-rate-inundacao           1000 consultas a 600 dominios em 10 s (net.dns.rate)
+  dns-tunnel-exfil             dados codificados em base32 nos subdominios (net.dns.tunnel)
 """
 import random, socket, struct, sys, os
 
@@ -24,6 +28,8 @@ def udp(sp, dp, data): return struct.pack("!HHHH", sp, dp, 8 + len(data), 0) + d
 SYN, RST, ACK, PSH = 0x02, 0x04, 0x10, 0x08
 
 def qname(n): return b"".join(bytes([len(l)]) + l.encode() for l in n.split(".")) + b"\0"
+def dns_query(txid, name, qtype=1):
+    return struct.pack("!HHHHHH", txid & 0xFFFF, 0x0100, 1, 0, 0, 0) + qname(name) + struct.pack("!HH", qtype, 1)
 def dns_nxdomain(name):
     return struct.pack("!HHHHHH", 0x1234, 0x8183, 1, 0, 0, 0) + qname(name) + struct.pack("!HH", 1, 1)
 
@@ -89,15 +95,45 @@ def scan_nmap_vertical():
             pk.append((at + 0.01, eth(ip4(6, tcp(port, 41000, RST | ACK), "198.51.100.7", CLIENT))))
     return pk
 
+def dns_q(at, name, qtype=1, txid=0):
+    return (at, eth(ip4(17, udp(40000 + txid % 20000, 53, dns_query(txid, name, qtype)), CLIENT, RESOLVER)))
+
+def dns_rate_navegador():
+    """Pagina pesada: ~100 dominios (hosts e CDNs), em A e AAAA, com repeticoes, em ~8 s."""
+    rng = random.Random(11)
+    pk, txid = [], 0
+    for i in range(210):
+        d = "cdn%d.site%d.example.com" % (rng.randrange(6), rng.randrange(13)) if i % 3 == 0 else "h%d.example.com" % (i % 75)
+        pk.append(dns_q(i * 0.038 + rng.uniform(0, 0.02), d, 28 if i % 2 else 1, txid))
+        txid += 1
+    return pk
+
+def dns_tunnel_balanceador():
+    """Seis balanceadores de carga: rotulo de 32 hex (aleatorio, longo) sob o mesmo dominio base."""
+    rng = random.Random(5)
+    return [dns_q(i * 4.0, "%032x.us-east-1.elb.example.net" % rng.getrandbits(128), 1, i) for i in range(6)]
+
+def dns_rate_inundacao():
+    rng = random.Random(13)
+    return [dns_q(i * 0.01, "x%d.example.com" % rng.randrange(600), 1, i) for i in range(1000)]
+
+def dns_tunnel_exfil():
+    """25 consultas com 52 caracteres de base32 (dados codificados) sob o mesmo dominio, em 30 s."""
+    rng = random.Random(17)
+    alfa = "abcdefghijklmnopqrstuvwxyz234567"
+    return [dns_q(i * 1.2, "".join(rng.choice(alfa) for _ in range(52)) + ".exfil.example.org", 16, i) for i in range(25)]
+
 def tls_sni_azure_blob():
     return [(0.0, eth(ip4(6, tcp(50200, 443, PSH | ACK, client_hello("productionresultssa8.blob.core.example.net")),
                           CLIENT, "203.0.113.20")))]
 
 CASES = {
     "falsos-positivos": {"beacon-keepalive": beacon_keepalive, "nxdomain-srv-apt": nxdomain_srv_apt,
-                         "scan-web-navegador": scan_web_navegador, "tls-sni-azure-blob": tls_sni_azure_blob},
+                         "scan-web-navegador": scan_web_navegador, "tls-sni-azure-blob": tls_sni_azure_blob,
+                         "dns-rate-navegador": dns_rate_navegador, "dns-tunnel-balanceador": dns_tunnel_balanceador},
     "verdadeiros-positivos": {"scan-nmap-vertical": scan_nmap_vertical, "scan-horizontal-443": scan_horizontal_443,
-                              "nxdomain-dga-com-srv": nxdomain_dga_com_srv},
+                              "nxdomain-dga-com-srv": nxdomain_dga_com_srv,
+                              "dns-rate-inundacao": dns_rate_inundacao, "dns-tunnel-exfil": dns_tunnel_exfil},
 }
 
 if __name__ == "__main__":

@@ -1,0 +1,2 @@
+--set
+detection.dns_rate.min_queries=400

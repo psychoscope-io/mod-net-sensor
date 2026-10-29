@@ -1,0 +1,2 @@
+# 25 consultas com 52 caracteres de base32 sob o mesmo dominio em 30 s. TEM de disparar.
+net.dns.tunnel

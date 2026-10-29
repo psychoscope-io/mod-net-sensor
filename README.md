@@ -135,9 +135,9 @@ scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padr�
 Dois diretórios de pcaps **sintéticos** (só endereços de documentação, gerados por `scripts/gen_fp_pcap.py`; captura real nunca entra aqui):
 
 - `testdata/falsos-positivos/`: o alerta é indevido. Hoje: `beacon-keepalive` (aplicativo que reabre a conexão a cada ~30 s), `nxdomain-srv-apt` (consultas SRV `_https._tcp.*`
-  que dão NXDOMAIN, como o apt), `scan-web-navegador` (40 conexões na 443 com handshake completo) e `tls-sni-azure-blob` (rótulo de 20 letras sob um armazenamento de nuvem).
+  que dão NXDOMAIN, como o apt), `scan-web-navegador` (40 conexões na 443 com handshake completo) `tls-sni-azure-blob` (rótulo de 20 letras sob um armazenamento de nuvem), `dns-rate-navegador` (~210 consultas a ~100 domínios em 8 s) e `dns-tunnel-balanceador` (nomes de balanceador de carga com rótulo de 32 hex).
 - `testdata/verdadeiros-positivos/`: o alerta **tem** de disparar, para que nenhum ajuste de limiar o perca: `scan-nmap-vertical`, `scan-horizontal-443` (150 hosts
-  sem resposta) e `nxdomain-dga-com-srv` (DGA misturado a consultas SRV).
+  sem resposta), `nxdomain-dga-com-srv` (DGA misturado a consultas SRV), `dns-rate-inundacao` (1 000 consultas em 10 s) e `dns-tunnel-exfil` (base32 nos subdomínios).
 
 Ao lado de cada pcap: `<nome>.esperado` (regras que disparam com os limiares padrão, uma por linha; `#` abre comentário. Nos falsos positivos, uma regra listada é um caso
 conhecido, mantido de propósito quando o sinal da regra não o separa do ataque; quando a regra passar a distingui-lo, o teste falha e o arquivo deve ser esvaziado) e,

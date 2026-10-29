@@ -1,0 +1,2 @@
+# 1000 consultas a 600 dominios em 10 s. TEM de disparar com o limiar padrao.
+net.dns.rate
