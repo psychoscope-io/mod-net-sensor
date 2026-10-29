@@ -125,7 +125,8 @@ scripts/e2e.sh                # daemon Go real + sensor (pcap sintético): 330 e
 scripts/analyze_fp.sh <cli> <sensor>  # só o catálogo: roda `analyze` em testdata/falsos-positivos/*.pcap e confere .esperado e .ajuste
 make bench                    # benchmark do caminho quente (veja docs/DESEMPENHO.md)
 scripts/live_smoke.sh         # captura AO VIVO em `lo` dentro de `unshare -Urn` (sem sudo)
-scripts/bench_live.sh         # serviço inteiro sob carga crescente em `lo` (sem sudo): perdas, CPU e memória (veja docs/DESEMPENHO.md)
+scripts/bench_live.sh         # serviço inteiro sob carga crescente em `lo` ou numa veth (BENCH_IFACE=veth) ou longa (BENCH_SOAK): perdas, CPU e memória, sem sudo (veja docs/DESEMPENHO.md)
+scripts/bench_replay.sh       # pcap grande de tráfego variado e tempestades de alertas no daemon real: vazão, perdas e alertas gravados
 scripts/fuzz.sh [segundos]    # cargo-fuzz: roda cada alvo por N segundos (padrão 60); exige nightly
 ```
 

@@ -10,7 +10,7 @@ Sensor de rede do Psychoscope em Rust: **Source → Decode → Sink**. Captura p
 - `src/pipeline.rs`: `decode_loop` (estado em `Decoder`, expiração ociosa da remontagem ao vivo) e `SensorController` (contadores no `StatsSnapshot`). `src/ipc/`: `framer.rs` e `client.rs` (Hello, reconexão com backoff, status, comandos), com o contrato `Controller`/`StatsSnapshot` em `client/controller.rs`. `src/main.rs` só liga as etapas (captura, decode, destino Core ou `--print`, sinais, resumo, encerramento).
 - Diagnóstico e uso: `src/interfaces.rs` (`--list-interfaces`), `src/check.rs` (`--check`), `src/explain.rs` (erros → instruções, funções puras), `src/output.rs` (`--print`, texto e JSON), `src/summary.rs` (resumo final e de `-v`). `benches/hot_path.rs` + `make bench` medem o caminho quente (`docs/DESEMPENHO.md`).
 - Testes dos módulos grandes ficam ao lado, em `<modulo>/tests.rs` (`ipc/client`, `reassembly`, `capture/sniffer`).
-- `fuzz/` (cargo-fuzz), `scripts/` (`demo.sh`, `e2e.sh`, `live_smoke.sh`, `bench_live.sh`, `fuzz.sh`, `gen_pcap.py`, `gen_fp_pcap.py`, `analyze_fp.sh`; `lib/build.sh` é o prólogo comum de demo, e2e e live_smoke: PATH do Go, local-deps, busca e build do Core; `tag.sh` é cópia compartilhada). `testdata/falsos-positivos/` e `testdata/verdadeiros-positivos/` são o catálogo de casos (o alerta é indevido / tem de disparar): pcaps SINTÉTICOS (só endereços de documentação) com `<nome>.esperado` (regras que ainda disparam com os limiares padrão) e `<nome>.ajuste` (argumentos do `psychoscope-cli analyze` que devem silenciá-los); `analyze_fp.sh` confere tudo e o `e2e.sh` o chama. Pcap de captura real nunca entra no repositório.
+- `fuzz/` (cargo-fuzz), `scripts/` (`demo.sh`, `e2e.sh`, `live_smoke.sh`, `bench_live.sh`, `bench_replay.sh`, `fuzz.sh`, `gen_pcap.py`, `gen_fp_pcap.py`, `gen_traffic_pcap.py` (pcap grande e sintético para o `bench_replay.sh`), `analyze_fp.sh`; `lib/build.sh` é o prólogo comum de demo, e2e e live_smoke: PATH do Go, local-deps, busca e build do Core; `tag.sh` é cópia compartilhada). `testdata/falsos-positivos/` e `testdata/verdadeiros-positivos/` são o catálogo de casos (o alerta é indevido / tem de disparar): pcaps SINTÉTICOS (só endereços de documentação) com `<nome>.esperado` (regras que ainda disparam com os limiares padrão) e `<nome>.ajuste` (argumentos do `psychoscope-cli analyze` que devem silenciá-los); `analyze_fp.sh` confere tudo e o `e2e.sh` o chama. Pcap de captura real nunca entra no repositório.
 
 ## Comandos
 
@@ -22,7 +22,8 @@ make tag                # scripts/tag.sh: sobe a versão do Cargo.toml/Cargo.loc
 scripts/demo.sh         # demo interativa para quem vai testar (clona o core se faltar); não faz parte do CI
 scripts/e2e.sh          # daemon Go real + pcap sintético (inclui `psychoscope-cli analyze` e o catálogo de falsos positivos); exige ../psychoscope-core
 scripts/live_smoke.sh   # captura ao vivo em `lo` dentro de `unshare -Urn`
-scripts/bench_live.sh   # carga em taxa crescente no serviço inteiro (lo, sem privilégios); tabela para docs/DESEMPENHO.md
+scripts/bench_live.sh   # carga em taxa crescente no serviço inteiro (lo ou BENCH_IFACE=veth; BENCH_SOAK=<s> para execução longa), sem privilégios; tabela para docs/DESEMPENHO.md
+scripts/bench_replay.sh # tráfego variado e tempestades de alertas por pcap, no daemon real; tabela para docs/DESEMPENHO.md
 scripts/fuzz.sh 30      # exige nightly e cargo-fuzz
 ```
 
