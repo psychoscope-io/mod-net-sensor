@@ -8,6 +8,7 @@
 #
 #   scripts/bench_replay.sh
 #   BENCH_N=300000 BENCH_STORM=10000 scripts/bench_replay.sh
+#   BENCH_QUEUE=65536 scripts/bench_replay.sh      # outro tamanho da fila do motor
 #
 # Sem privilegios (nao captura de interface). Requer ../psychoscope-core e python3.
 set -euo pipefail
@@ -15,6 +16,8 @@ export LC_ALL=C
 
 N="${BENCH_N:-500000}"          # eventos do cenario `variado`
 STORM="${BENCH_STORM:-20000}"   # origens/clientes de cada tempestade (= alertas esperados)
+QUEUE="${BENCH_QUEUE:-4096}"    # detection.queue_size (fila de entrada do motor)
+case "$QUEUE" in "" | *[!0-9]*) echo "BENCH_QUEUE deve ser um numero inteiro (recebi: $QUEUE)" >&2; exit 2 ;; esac
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=/dev/null
@@ -47,6 +50,7 @@ run_scenario() { # nome modo n
   expected="$(python3 "$HERE/scripts/gen_traffic_pcap.py" "$dir/t.pcap" --modo "$modo" --n "$n")"
   cat > "$dir/cfg.json" <<JSON
 { "status_interval": "1s",
+  "detection": { "queue_size": $QUEUE },
   "modules": [{ "id": "mod-net-sensor", "path": "$HERE/target/release/mod-net-sensor",
                 "args": ["--pcap-file", "$dir/t.pcap"], "connect_timeout": "10s", "stop_grace": "5s" }],
   "storage": { "path": "$dir/alerts.db", "max_alerts": 1000000 },
