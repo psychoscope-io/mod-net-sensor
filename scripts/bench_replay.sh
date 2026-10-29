@@ -9,6 +9,7 @@
 #   scripts/bench_replay.sh
 #   BENCH_N=300000 BENCH_STORM=10000 scripts/bench_replay.sh
 #   BENCH_QUEUE=65536 scripts/bench_replay.sh      # outro tamanho da fila do motor
+#   BENCH_LOG_LEVEL=info scripts/bench_replay.sh   # com o log de cada alerta, como no servico
 #
 # Sem privilegios (nao captura de interface). Requer ../psychoscope-core e python3.
 set -euo pipefail
@@ -17,6 +18,7 @@ export LC_ALL=C
 N="${BENCH_N:-500000}"          # eventos do cenario `variado`
 STORM="${BENCH_STORM:-20000}"   # origens/clientes de cada tempestade (= alertas esperados)
 QUEUE="${BENCH_QUEUE:-4096}"    # detection.queue_size (fila de entrada do motor)
+LOGLEVEL="${BENCH_LOG_LEVEL:-error}"  # info reproduz o servico (um log por alerta, sincrono no motor)
 case "$QUEUE" in "" | *[!0-9]*) echo "BENCH_QUEUE deve ser um numero inteiro (recebi: $QUEUE)" >&2; exit 2 ;; esac
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -58,7 +60,7 @@ run_scenario() { # nome modo n
 JSON
   local cli="$TMP/psychoscope-cli --ctl-socket $dir/ctl.sock"
   # o servico fica parado no inicio ate o pcap estar pronto: a contagem de tempo comeca na conexao do sensor
-  "$TMP/psychoscope" --config "$dir/cfg.json" --socket "$dir/core.sock" --ctl-socket "$dir/ctl.sock" --log-level error 2> "$TMP/daemon.log" &
+  "$TMP/psychoscope" --config "$dir/cfg.json" --socket "$dir/core.sock" --ctl-socket "$dir/ctl.sock" --log-level "$LOGLEVEL" 2> "$TMP/daemon.log" &
   DPID=$!
   local t0 s0 d0
   for _ in $(seq 400); do $cli list 2>/dev/null | grep -q CONECTADO && break; sleep 0.02; done
