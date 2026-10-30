@@ -7,5 +7,5 @@
 - **Bug corrigido nasce de um teste que o reproduz.**
 - **Reproduza o CI.** Ele usa as ferramentas mais novas (clippy, Go). Instale a toolchain estável mais recente isolada (diretórios temporários), sem alterar a do usuário.
 - **Testes herméticos:** caminhos explícitos em diretório temporário, sem depender de HOME, rede, root ou do que existe na máquina. Esperas por condição (`eventually`), não por `sleep` fixo.
-- **Declare o que não foi verificado:** GitHub Actions, systemd real, `setcap`, runners arm64, qualquer coisa que exija root.
+- **Declare o que não foi verificado:** GitHub Actions, systemd real, capabilities ambientes, runners arm64, qualquer coisa que exija root.
 - **Nunca enfraqueça uma verificação** (teste, lint, limite) para fazer algo passar; corrija a causa.
