@@ -14,8 +14,10 @@
 set -euo pipefail
 
 VERSION=1.10.7
-# SHA256 do libpcap-$VERSION.tar.gz, fixado na primeira obtencao (o tcpdump.org nao publica a soma):
-# ao subir a versao, baixe, confira a assinatura .sig e atualize os dois valores.
+# SHA256 do libpcap-$VERSION.tar.gz (o tcpdump.org nao publica a soma). A assinatura .sig da 1.10.7 foi
+# conferida com gpg contra a chave de pacotes do Tcpdump Group, baixada de tcpdump.org (a chave em si
+# foi aceita na primeira obtencao): fingerprint 1F16 6A57 42AB B9E0 249A 8D30 E089 DEF1 D9C1 5D0D.
+# Ao subir a versao, baixe, confira a assinatura .sig com essa chave e atualize VERSION e SHA256.
 SHA256=0b394ac90dbc0a9838ff97468e05c9c9a3e873dec2514cd58db65d859d296e31
 
 if [ "$#" -ne 1 ]; then
