@@ -94,13 +94,13 @@ Clientes com chave pós-quântica passam de 1,4 KB e o SNI pode cair no segundo 
 
 ## Privilégios
 
-Captura ao vivo exige `CAP_NET_RAW` + `CAP_NET_ADMIN` (ou root). Preferível a rodar como root:
+Captura ao vivo exige `CAP_NET_RAW` + `CAP_NET_ADMIN` (ou root). Para rodar o sensor **avulso** (testes, `--check`, demo), é preferível a rodar como root:
 
 ```
 sudo setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/mod-net-sensor
 ```
 
-O Core (e o supervisor) seguem sem privilégios. Requer `libpcap-dev` para compilar e `libpcap` para executar.
+Como **serviço** não se usa `setcap`: a unit `psychoscope-sensor.service` (instalada pelo `psychoscope-core`) roda o sensor com usuário próprio e entrega essas duas capabilities como `AmbientCapabilities`. O motivo é o systemd 252 (Debian 12), que anula as file capabilities quando a unit usa opções de isolamento; veja `docs/INSTALL.md` do `psychoscope-core`. O Core segue sem privilégios. Requer `libpcap-dev` para compilar e `libpcap` para executar.
 
 Compilar: `make build` gera `dist/mod-net-sensor` (`cargo build --release --locked`). Para montar o ambiente inteiro (clonar os três repositórios, atualizar e compilar tudo em `dist/`), use `scripts/dev.sh` do repositório [.github](https://github.com/psychoscope-io/.github).
 
@@ -169,6 +169,6 @@ Apache License 2.0 — veja [LICENSE](LICENSE).
 
 Cada tag `vX.Y.Z` (igual à versão do `Cargo.toml`) publica tarballs `linux/amd64` e `linux/arm64`, `SHA256SUMS` e atestado de
 proveniência (`gh attestation verify <tarball> --repo psychoscope-io/mod-net-sensor`). O binário é compilado em Ubuntu 22.04
-(glibc 2.35) e precisa de `libpcap0.8` em tempo de execução. A instalação como serviço (usuário dedicado, `setcap` e unit do
-systemd) é feita pelo `get.sh` (baixa, confere e instala Core e sensor; depois, `psychoscope-update`) ou pelo `install.sh` do `psychoscope-core`: veja `docs/INSTALL.md` naquele repositório. Para criar a tag da próxima versão: `make tag` (`scripts/tag.sh`, só local; ajusta `Cargo.toml`/`Cargo.lock` e o push é seu).
+(glibc 2.35) e precisa de `libpcap0.8` em tempo de execução. A instalação como serviço (usuário dedicado e unit própria do
+systemd, com as capabilities de captura como ambientes) é feita pelo `get.sh` (baixa, confere e instala Core e sensor; depois, `psychoscope-update`) ou pelo `install.sh` do `psychoscope-core`: veja `docs/INSTALL.md` naquele repositório. Para criar a tag da próxima versão: `make tag` (`scripts/tag.sh`, só local; ajusta `Cargo.toml`/`Cargo.lock` e o push é seu).
 
