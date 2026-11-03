@@ -8,4 +8,4 @@
 - **Histórico publicado é imutável:** não reescreva e não mova tags. Antes de publicar a reescrita é aceitável, mas refaça os pins: a tag do `psychoscope-proto`, o `go.sum` do core e o `Cargo.lock` do sensor.
 - **Tag local só por necessidade técnica** (por exemplo, calcular o `go.sum`), e sempre avisando o dono.
 - **Antes de publicar,** confira: `git grep` por e-mail pessoal, caminhos absolutos do usuário (diretório pessoal) e segredos; autor e committer de todos os commits; árvore limpa.
-- **Ordem de publicação:** `psychoscope-proto` (branch e tag) → `psychoscope-core` → `mod-net-sensor` → `.github`.
+- **Ordem de publicação:** `psychoscope-proto` (branch e tag) → `psychoscope-core` → `mod-net-sensor` → `mod-example` → `.github`.
