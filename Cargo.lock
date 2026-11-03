@@ -773,7 +773,7 @@ checksum = "263a3f48f01e7309e857138bd47f785585b4a005e8e56c6d2824ce91195999c3"
 [[package]]
 name = "psychoscope-proto"
 version = "0.1.0"
-source = "git+https://github.com/psychoscope-io/psychoscope-proto?tag=v0.4.0#3d6bc7745d2665f31cebaeccc157e639543e7244"
+source = "git+https://github.com/psychoscope-io/psychoscope-proto?tag=v0.6.0#3ecb1b30db82aeb74c6d24a9b6d9936def09605b"
 dependencies = [
  "prost",
  "prost-build",
